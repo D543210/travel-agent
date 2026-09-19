@@ -262,10 +262,10 @@
           :message="`当前仅提供了 ${tripPlan.weather_info.length} 天可靠天气预报。`"
           :description="`本次行程共 ${tripPlan.days.length} 天。未显示的日期超出当前天气预报范围，请临近出发时再次查询。`"
           style="margin-top: 20px;margin-bottom: 20px"
-        >
-        </a-alert>
-
+        />
         
+
+
         <a-card id="weather" v-if="tripPlan.weather_info && tripPlan.weather_info.length > 0" title="天气信息" style="margin-top: 20px" :bordered="false">
         <a-list
           :data-source="tripPlan.weather_info"

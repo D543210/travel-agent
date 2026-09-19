@@ -8,6 +8,13 @@ from ...models.schemas import (
 )
 from ...agents.trip_planner_agent import get_trip_planner_agent
 
+from ...exceptions import (
+    AgentOutputError,
+    ExternalServiceError,
+    PlanValidationError,
+    TripPlanningError,
+)
+
 router = APIRouter(prefix="/trip", tags=["旅行规划"])
 
 
@@ -51,13 +58,49 @@ async def plan_trip(request: TripRequest):
             data=trip_plan
         )
 
-    except Exception as e:
-        print(f"❌ 生成旅行计划失败: {str(e)}")
-        import traceback
-        traceback.print_exc()
+    except ExternalServiceError:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "EXTERNAL_SERVICE_UNAVAILABLE",
+                "message": "外部数据服务暂时不可用，请稍后重试",
+            },
+        )
+
+    except AgentOutputError:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "AGENT_OUTPUT_INVALID",
+                "message": "模型生成结果未通过结构校验，请重新生成",
+            },
+        )
+
+    except PlanValidationError:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "PLAN_VALIDATION_FAILED",
+                "message": "生成的行程未通过可靠性校验，请重新生成",
+            },
+        )
+
+    except TripPlanningError:
         raise HTTPException(
             status_code=500,
-            detail=f"生成旅行计划失败: {str(e)}"
+            detail={
+                "code": "TRIP_PLANNING_FAILED",
+                "message": "旅行规划失败，请稍后重试",
+            },
+        )
+
+    except Exception:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "INTERNAL_ERROR",
+                "message": "系统内部错误",
+            },
         )
 
 

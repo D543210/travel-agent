@@ -1,14 +1,78 @@
 """高德地图MCP服务封装"""
 
+from dbm import error
 from typing import List, Dict, Any, Optional
 from hello_agents.tools import MCPTool
 from ..config import get_settings
 from ..models.schemas import Location, POIInfo, WeatherInfo
+from .mcp_response_parser import extract_json_value
 #将MCP返回的JSON字符串转换成Python对象(dict)
 import json
 # 全局MCP工具实例
 _amap_mcp_tool = None
 
+def parse_location(value:Any)->Location:
+    """
+    将MCP返回的坐标数据解析为Location对象
+    
+    Args:
+        value: MCP返回的坐标数据
+    
+    Returns:
+        Location对象
+    """
+    if not isinstance(value, str):
+        raise ValueError("location必须是字符串")
+
+    parts = value.split(",")
+
+    if len(parts) != 2:
+        raise ValueError(f"location格式错误: {value}")
+
+    try:
+        longitude = float(parts[0].strip())
+        latitude = float(parts[1].strip())
+    except ValueError as error:
+        raise ValueError(f"location包含非数字坐标: {value}") from error
+
+    if not -180<=longitude<=180:
+        raise ValueError(f"经度超出范围: {longitude}")
+    
+    if not -90<=latitude<=90:
+        raise ValueError(f"纬度超出范围: {latitude}")
+
+    return Location(longitude=longitude, latitude=latitude)
+
+def parse_poi_detail(data:Dict[str,Any])->POIInfo:
+    """
+    将MCP返回的POI详情数据解析为POIInfo对象
+    
+    Args:
+        data: MCP返回的POI详情数据
+    
+    Returns:
+        POIInfo对象
+    """
+    if not isinstance(data, dict):
+        raise ValueError("POI详情数据必须是字典")
+
+    poi_id = str(data.get("id", "")).strip()
+    name = str(data.get("name", "")).strip()
+
+    if not poi_id:
+        raise ValueError("POI详情数据缺少id字段")
+
+    if not name:
+        raise ValueError("POI详情数据缺少name字段")
+
+    return POIInfo(
+        id=poi_id,
+        name=name,
+        type=str(data.get("type", "")).strip(),
+        address=str(data.get("address", "")).strip(),
+        location=parse_location(data.get("location")),
+        tel=data.get("tel")
+    )
 
 def get_amap_mcp_tool() -> MCPTool:
     """
@@ -79,17 +143,44 @@ class AmapService:
                 }
             })
             
-            # 解析结果
-            # 注意: MCP工具返回的是字符串,需要解析
-            # 这里简化处理,实际应该解析JSON
-            print(f"POI搜索结果: {result[:200]}...")  # 打印前200字符
-            
-            # TODO: 解析实际的POI数据
-            return []
-            
-        except Exception as e:
-            print(f"❌ POI搜索失败: {str(e)}")
-            return []
+            data = extract_json_value(result)
+
+            if not isinstance(data, dict):
+                raise ValueError("POI搜索结果不是JSON响应对象")
+
+            poi_items = data.get("pois", [])
+
+            if not isinstance(poi_items, list):
+                raise ValueError("POI搜索结果中的pois不是列表")
+
+            poi_info_list : List[POIInfo] = []
+
+            # 暂时最多解析前10条，避免产生过多详情请求
+            for item in poi_items[:10]:
+                if not isinstance(item, dict):
+                    continue
+
+                poi_id = str(item.get("id", "")).strip()
+
+                if not poi_id:
+                    continue
+
+                try:
+                    poi_info = self.get_poi_info(poi_id)
+                    poi_info_list.append(poi_info)
+                except Exception as error:
+                    # 单个POI失败，不影响其他POI
+                    print(f"⚠️ 跳过POI {poi_id}: {error}")
+
+            if not poi_info_list:
+                raise ValueError("没有获得有效的POI详情")
+
+            return poi_info_list
+
+        except Exception as error:
+            print(f"❌ POI搜索失败: {error}")
+            raise
+           
     
     def get_weather(self, city: str) -> List[WeatherInfo]:
         """
@@ -252,6 +343,40 @@ class AmapService:
         except Exception as e:
             print(f"❌ 地理编码失败: {str(e)}")
             return None
+
+    def get_poi_info(self, poi_id: str) -> POIInfo:
+        """
+        获取POI信息
+
+        Args:
+            poi_id: POI ID
+
+        Returns:
+            POI信息
+        """
+        if not poi_id:
+            raise ValueError("poi_id不能为空")
+
+        try:
+            result = self.mcp_tool.run({
+                "action": "call_tool",
+                "tool_name": "maps_search_detail",
+                "arguments": {
+                    "id": poi_id
+                }
+            })
+
+            # 解析结果并提取POI详情
+            data = extract_json_value(result)
+
+            if not isinstance(data, dict):
+                raise ValueError("POI详情数据不是JSON响应对象")
+
+            return parse_poi_detail(data)
+
+        except Exception as error:
+            print(f"❌ 获取POI信息失败: {error}")
+            raise
 
     def get_poi_detail(self, poi_id: str) -> Dict[str, Any]:
         """

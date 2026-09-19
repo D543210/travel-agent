@@ -44,7 +44,12 @@ export async function generateTripPlan(formData: TripFormData): Promise<TripPlan
     return response.data
   } catch (error: any) {
     console.error('生成旅行计划失败:', error)
-    throw new Error(error.response?.data?.detail || error.message || '生成旅行计划失败')
+    const detail = error.response?.data?.detail
+
+    const message =
+      typeof detail === 'string'? detail: detail?.message || error.message || '生成旅行计划失败'
+
+    throw new Error(message)
   }
 }
 

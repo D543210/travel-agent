@@ -166,6 +166,25 @@ class POIInfo(BaseModel):
     location: Location = Field(..., description="经纬度坐标")
     tel: Optional[str] = Field(default=None, description="电话")
 
+class RankedAttraction(BaseModel):
+    """景点Agent选择的一条景点记录"""
+
+    poi_id: str = Field(..., description="来自高德的POI ID")
+    reason: str = Field(..., description="推荐原因")
+    suggested_duration: int = Field(
+        default=120,
+        ge=30,
+        le=480,
+        description="建议游览时间(分钟)"
+    )
+
+class AttractionSelection(BaseModel):
+    """景点Agent结构化选择结果。"""
+
+    attractions: List[RankedAttraction] = Field(
+        default_factory=list,
+        description="Agent从候选景点中选出的景点"
+    )
 
 class POISearchResponse(BaseModel):
     """POI搜索响应"""
