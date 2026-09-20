@@ -261,6 +261,18 @@ class MultiAgentTripPlanner:
 
             print(f"获取到真实景点候选: {len(attraction_candidates)}个")
 
+
+            minimum_required = request.travel_days * 2
+            maximum_required = min(len(attraction_candidates), request.travel_days * 3,)
+            
+            if len(attraction_candidates) < minimum_required:
+                raise PlanValidationError(
+                    f"有效景点候选不足："
+                    f"当前只有{len(attraction_candidates)}个，"
+                    f"{request.travel_days}天行程至少需要"
+                    f"{minimum_required}个"
+                )
+            
             attraction_query = self._build_attraction_query(
                 request=request,
                 candidates=attraction_candidates
@@ -270,6 +282,7 @@ class MultiAgentTripPlanner:
                 attraction_response = self.attraction_agent.run(
                     attraction_query
                 )
+
             except Exception as error:
                 raise ExternalServiceError(
                     "景点筛选模型暂时不可用"
@@ -289,12 +302,22 @@ class MultiAgentTripPlanner:
             attraction_selection = AttractionSelection.model_validate(
                 attraction_selection_data
             )
+            selection_count = len(attraction_selection.attractions)
 
-            if not attraction_selection.attractions:
+            if selection_count < minimum_required:
                 raise PlanValidationError(
-                    "景点Agent没有选择任何景点"
+                    f"景点Agent选择数量不足："
+                    f"实际选择{selection_count}个，"
+                    f"至少需要{minimum_required}个"
                 )
-            
+
+            if selection_count > maximum_required:
+                raise PlanValidationError(
+                    f"景点Agent选择数量过多："
+                    f"实际选择{selection_count}个，"
+                    f"最多允许{maximum_required}个"
+                )
+                        
             print(
                 f"景点Agent选择了"
                 f"{len(attraction_selection.attractions)}个景点"
@@ -328,7 +351,13 @@ class MultiAgentTripPlanner:
                 raise PlanValidationError(
                     f"景点Agent返回了候选列表之外的POI ID: {unknown_ids}"
                 )
+            selected_by_id = {
+                item.poi_id: item
+                for item in attraction_selection.attractions
+            }
 
+            selected_id_set = set(selected_by_id)
+            
             trusted_attractions = []
 
             for selected in attraction_selection.attractions:
@@ -398,26 +427,33 @@ class MultiAgentTripPlanner:
                 attraction_count = len(day.attractions)
 
                 if attraction_count < 2 or attraction_count > 3:
-                    raise ValueError(
+                    raise PlanValidationError(
                         f"第{day.day_index + 1}天的景点数量不合理: "
                         f"{attraction_count}个，要求每天2到3个"
                     )
                 
                 for attraction in day.attractions:
                     if not attraction.poi_id:
-                        raise ValueError(
+                        raise PlanValidationError(
                             f"第{day.day_index + 1}天的景点"
                             f"“{attraction.name}”缺少poi_id"
                         )
 
                     if attraction.poi_id not in candidate_by_id:
-                        raise ValueError(
+                        raise PlanValidationError(
                             f"第{day.day_index + 1}天使用了未知景点POI ID: "
                             f"{attraction.poi_id}"
                         )
-
+                    
+                    if attraction.poi_id not in selected_id_set:
+                        raise PlanValidationError(
+                            f"第{day.day_index + 1}天使用了"
+                            f"景点Agent未选中的POI ID："
+                            f"{attraction.poi_id}"
+                        )
+                    
                     if attraction.poi_id in scheduled_poi_ids:
-                        raise ValueError(
+                        raise PlanValidationError(
                             f"景点被重复安排: {attraction.poi_id}"
                         )
 
@@ -463,9 +499,10 @@ class MultiAgentTripPlanner:
             indent=2
         )
 
-        expected_count = min(
+        minimum_required = request.travel_days * 2
+        maximum_required = min(
             len(candidates),
-            request.travel_days*3
+            request.travel_days * 3,
         )
 
         return f"""请从候选景点中选择适合本次旅行的景点。
@@ -474,10 +511,14 @@ class MultiAgentTripPlanner:
 - 城市：{request.city}
 - 旅行天数：{request.travel_days}
 - 用户偏好：{", ".join(request.preferences) if request.preferences else "无"}
-- 期望选择数量：最多{expected_count}个
+- 最少选择数量：{minimum_required}个
+- 最多选择数量：{maximum_required}个
 
 候选景点：
 {candidate_json}
+
+只允许选择候选列表中的POI ID。
+选择数量必须在{minimum_required}到{maximum_required}之间。
 
 请严格按照系统提示词规定的JSON格式返回结果。
 """
