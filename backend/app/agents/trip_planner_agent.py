@@ -461,11 +461,14 @@ class MultiAgentTripPlanner:
 
                     source_poi = candidate_by_id[attraction.poi_id]
 
+                    selected = selected_by_id[attraction.poi_id]
+
                     attraction.name = source_poi.name
                     attraction.address = source_poi.address
                     attraction.location = source_poi.location.model_copy(deep=True)
                     attraction.category = source_poi.type
-
+                    attraction.visit_duration = (selected.suggested_duration)
+                    attraction.description = selected.reason
             trusted_weather_info = [
                 weather
                 for weather in weather_info_list
