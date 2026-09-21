@@ -27,6 +27,7 @@ export interface Meal {
 }
 
 export interface Hotel {
+  poi_id: string
   name: string
   address: string
   location?: Location

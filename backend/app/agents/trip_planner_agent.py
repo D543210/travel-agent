@@ -11,6 +11,7 @@ from ..models.schemas import (
     WeatherInfo,
     POIInfo,
     AttractionSelection,
+    HotelSelection
 )
 from ..config import get_settings
 from ..services.amap_service import get_amap_service
@@ -52,23 +53,30 @@ ATTRACTION_AGENT_PROMPT = """你是景点筛选专家。
 }
 """
 
-HOTEL_AGENT_PROMPT = """你是酒店推荐专家。你的任务是根据城市和景点位置推荐合适的酒店。
+HOTEL_AGENT_PROMPT = """你是酒店筛选专家。
 
-**重要提示:**
-你必须使用工具来搜索酒店!不要自己编造酒店信息!
+你的任务是根据用户的住宿偏好和景点位置，
+从输入提供的真实候选酒店中选择合适的酒店。
 
-**工具调用格式:**
-使用maps_text_search工具搜索酒店时,必须严格按照以下格式:
-`[TOOL_CALL:amap_maps_text_search:keywords=酒店,city=城市名]`
+必须严格遵守以下规则：
 
-**示例:**
-用户: "搜索北京的酒店"
-你的回复: [TOOL_CALL:amap_maps_text_search:keywords=酒店,city=北京]
+1. 只能选择候选酒店中真实存在的poi_id
+2. 不得创建、修改或猜测poi_id
+3. 不得修改酒店名称、地址、类型和坐标
+4. 根据住宿偏好和主要景点位置进行选择
+5. 每家酒店需要提供推荐理由
+6. 只返回JSON，不要返回Markdown代码块或额外说明
 
-**注意:**
-1. 必须使用工具,不要直接回答
-2. 格式必须完全正确,包括方括号和冒号
-3. 关键词使用"酒店"或"宾馆"
+返回格式：
+
+{
+  "hotels": [
+    {
+      "poi_id": "候选酒店中的真实ID",
+      "reason": "推荐原因"
+    }
+  ]
+}
 """
 
 PLANNER_AGENT_PROMPT = """你是行程规划专家。你的任务是根据景点信息和天气信息,生成详细的旅行计划。
@@ -87,6 +95,7 @@ PLANNER_AGENT_PROMPT = """你是行程规划专家。你的任务是根据景点
       "transportation": "交通方式",
       "accommodation": "住宿类型",
       "hotel": {
+        "poi_id": "高德酒店POI ID",
         "name": "酒店名称",
         "address": "酒店地址",
         "location": {"longitude": 116.397128, "latitude": 39.916527},
@@ -138,7 +147,7 @@ PLANNER_AGENT_PROMPT = """你是行程规划专家。你的任务是根据景点
 ```
 
 **重要提示:**
-1. 景点信息必须严格使用输入中提供的数据：
+1. **景点信息必须严格使用输入中提供的数据**：
    - 只能安排输入中存在的景点
    - 每个景点必须保留原始poi_id
    - 不得创建或修改poi_id
@@ -148,12 +157,17 @@ PLANNER_AGENT_PROMPT = """你是行程规划专家。你的任务是根据景点
   - 不得推测、补全或生成输入中不存在日期的天气
   - 不得修改输入天气的日期、天气、温度、风向和风力
   - 如果某个旅行日期没有天气数据，则不要在weather_info中生成该日期
-3. 温度必须是纯数字(不要带°C等单位)
-4. 每天安排2-3个景点
-5. 考虑景点之间的距离和游览时间
-6. 每天必须包含早中晚三餐
-7. 提供实用的旅行建议
-8. **必须包含预算信息**:
+3. **酒店信息必须严格使用输入提供的数据**：
+  - 每天的hotel必须包含poi_id
+  - 只能使用酒店信息中存在的poi_id
+  - 不得修改酒店名称、地址、坐标和类型
+  - 不得生成输入中不存在的酒店
+4. 温度必须是纯数字(不要带°C等单位)
+5. 每天安排2-3个景点
+6. 考虑景点之间的距离和游览时间
+7. 每天必须包含早中晚三餐
+8. 提供实用的旅行建议
+9. **必须包含预算信息**:
    - 景点门票价格(ticket_price)
    - 餐饮预估费用(estimated_cost)
    - 酒店预估费用(estimated_cost)
@@ -198,7 +212,6 @@ class MultiAgentTripPlanner:
                 llm=self.llm,
                 system_prompt=HOTEL_AGENT_PROMPT
             )
-            self.hotel_agent.add_tool(self.amap_tool)
 
             # 创建行程规划Agent(不需要工具)
             print("  - 创建行程规划Agent...")
@@ -264,7 +277,7 @@ class MultiAgentTripPlanner:
 
             minimum_required = request.travel_days * 2
             maximum_required = min(len(attraction_candidates), request.travel_days * 3,)
-            
+
             if len(attraction_candidates) < minimum_required:
                 raise PlanValidationError(
                     f"有效景点候选不足："
@@ -272,7 +285,7 @@ class MultiAgentTripPlanner:
                     f"{request.travel_days}天行程至少需要"
                     f"{minimum_required}个"
                 )
-            
+
             attraction_query = self._build_attraction_query(
                 request=request,
                 candidates=attraction_candidates
@@ -400,13 +413,126 @@ class MultiAgentTripPlanner:
 
             # 步骤3: 酒店推荐Agent搜索酒店
             print("🏨 步骤3: 搜索酒店...")
-            hotel_query = f"请搜索{request.city}的{request.accommodation}酒店"
-            hotel_response = self.hotel_agent.run(hotel_query)
-            print(f"酒店搜索结果: {hotel_response[:200]}...\n")
+            hotel_query = f"请搜索{request.city}的{request.accommodation}"
+            hotel_keyword = request.accommodation.strip()
+
+            if not hotel_keyword.endswith(("酒店", "宾馆")):
+                hotel_keyword += "酒店"
+            try:
+                hotel_candidates = amap_service.search_poi(
+                    keywords=hotel_keyword,
+                    city=request.city,
+                )
+            except Exception as error:
+                raise ExternalServiceError(
+                    "酒店数据服务暂时不可用"
+                ) from error
+
+            candidate_hotel_by_id = {
+                hotel.id: hotel
+                for hotel in hotel_candidates
+            }
+            selected_attraction_pois = [
+                candidate_by_id[item.poi_id]
+                for item in attraction_selection.attractions
+            ]
+
+            hotel_query = self._build_hotel_query(
+                request=request,
+                candidates=hotel_candidates,
+                selected_attractions=selected_attraction_pois
+            )
+            try:
+                hotel_response = self.hotel_agent.run(
+                    hotel_query
+                )
+
+            except Exception as error:
+                raise ExternalServiceError(
+                    "酒店筛选模型暂时不可用"
+                ) from error
+
+            print(f"酒店筛选结果: {hotel_response[:200]}...\n")
+            try:
+                hotel_selection_data = extract_json_value(
+                    hotel_response
+                )
+
+                if not isinstance(hotel_selection_data, dict):
+                    raise AgentOutputError(
+                        "酒店Agent返回的不是JSON对象"
+                    )
+
+                hotel_selection = HotelSelection.model_validate(
+                    hotel_selection_data
+                )
+
+            except MCPResponseParseError as error:
+                raise AgentOutputError(
+                    "酒店Agent响应中没有合法JSON"
+                ) from error
+
+            except ValidationError as error:
+                raise AgentOutputError(
+                    "酒店Agent返回的数据不符合HotelSelection结构"
+                ) from error
+
+            selection_count = len(hotel_selection.hotels)
+
+            if selection_count < 1 or selection_count > 3:
+                raise PlanValidationError(
+                    f"酒店Agent选择数量不合理：{selection_count}家，"
+                    "要求选择1至3家"
+                )
+
+            selected_hotel_ids = [
+                hotel.poi_id
+                for hotel in hotel_selection.hotels
+            ]
+
+            if len(selected_hotel_ids) != len(set(selected_hotel_ids)):
+                raise PlanValidationError("酒店Agent返回了重复的POI ID")
+
+            unknown_ids = [
+                poi_id
+                for poi_id in selected_hotel_ids
+                if poi_id not in candidate_hotel_by_id
+            ]
+
+            if unknown_ids:
+                raise PlanValidationError(
+                    f"酒店Agent返回了候选列表之外的POI ID: {unknown_ids}"
+                )
+
+
+            selected_hotel_id_set = set(selected_hotel_ids)
+
+            # 7. 生成可信酒店数据
+            trusted_hotels = [
+                {
+                    "poi_id": candidate_hotel_by_id[item.poi_id].id,
+                    "name": candidate_hotel_by_id[item.poi_id].name,
+                    "address": candidate_hotel_by_id[item.poi_id].address,
+                    "location": (
+                        candidate_hotel_by_id[item.poi_id]
+                        .location.model_dump()
+                    ),
+                    "type": candidate_hotel_by_id[item.poi_id].type,
+                    "reason": item.reason,
+                }
+                for item in hotel_selection.hotels
+            ]
+
+            trusted_hotels_json = json.dumps(
+                trusted_hotels,
+                ensure_ascii=False,
+                indent=2,
+            )
+
 
             # 步骤4: 行程规划Agent整合信息生成计划
             print("📋 步骤4: 生成行程计划...")
-            planner_query = self._build_planner_query(request, trusted_attractions_json, weather_response, hotel_response)
+            planner_query = self._build_planner_query(request, trusted_attractions_json, weather_response, trusted_hotels_json)
             try:
                 planner_response = self.planner_agent.run(
                     planner_query
@@ -424,6 +550,34 @@ class MultiAgentTripPlanner:
             scheduled_poi_ids = set()
 
             for day in trip_plan.days:
+
+                # 酒店校验
+                if day.hotel is None:
+                    raise PlanValidationError(
+                        f"第{day.day_index + 1}天缺少酒店"
+                    )
+
+                if not day.hotel.poi_id:
+                    raise PlanValidationError(
+                        f"第{day.day_index + 1}天的酒店缺少poi_id"
+                    )
+
+                if day.hotel.poi_id not in selected_hotel_id_set:
+                    raise PlanValidationError(
+                        f"第{day.day_index + 1}天使用了"
+                        f"酒店Agent未选中的POI ID：{day.hotel.poi_id}"
+                    )
+
+                source_hotel = candidate_hotel_by_id[day.hotel.poi_id]
+
+                # 用高德真实数据覆盖规划Agent输出
+                day.hotel.name = source_hotel.name
+                day.hotel.address = source_hotel.address
+                day.hotel.location = source_hotel.location.model_copy(deep=True)
+                day.hotel.type = source_hotel.type
+
+
+
                 attraction_count = len(day.attractions)
 
                 if attraction_count < 2 or attraction_count > 3:
@@ -526,6 +680,42 @@ class MultiAgentTripPlanner:
 请严格按照系统提示词规定的JSON格式返回结果。
 """
 
+    def _build_hotel_query(self, request: TripRequest, candidates:List[POIInfo], selected_attractions:List[POIInfo]) -> str:
+        candidate_data = [
+            poi.model_dump()
+            for poi in candidates
+        ]
+
+        candidate_json = json.dumps(
+            candidate_data,
+            ensure_ascii=False,
+            indent=2
+        )
+
+        attraction_json = json.dumps(
+                [attraction.model_dump() for attraction in selected_attractions],
+                ensure_ascii=False,
+                indent=2,
+            )
+
+        return f"""请从候选酒店中选择适合本次旅行的酒店。
+
+旅行信息：
+- 城市：{request.city}
+- 住宿偏好：{request.accommodation}
+- 旅行天数：{request.travel_days}
+
+已选景点：
+{attraction_json}
+
+候选酒店：
+{candidate_json}
+
+请选择1至3家酒店。
+只能选择候选列表中的POI ID。
+请严格按照系统提示词规定的JSON格式返回结果。
+"""
+
     def _build_planner_query(self, request: TripRequest, attractions: str, weather: str, hotels: str = "") -> str:
         """构建行程规划查询"""
         query = f"""请根据以下信息生成{request.city}的{request.travel_days}天旅行计划:
@@ -604,4 +794,3 @@ def get_trip_planner_agent() -> MultiAgentTripPlanner:
         _multi_agent_planner = MultiAgentTripPlanner()
 
     return _multi_agent_planner
-

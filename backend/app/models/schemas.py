@@ -114,6 +114,7 @@ class Meal(BaseModel):
 
 class Hotel(BaseModel):
     """酒店信息"""
+    poi_id: str = Field(..., description="高德POI ID")
     name: str = Field(..., description="酒店名称")
     address: str = Field(default="", description="酒店地址")
     location: Optional[Location] = Field(default=None, description="酒店位置")
@@ -123,6 +124,15 @@ class Hotel(BaseModel):
     type: str = Field(default="", description="酒店类型")
     estimated_cost: int = Field(default=0, description="预估费用(元/晚)")
 
+class RankedHotel(BaseModel):
+    poi_id: str = Field(..., description="来自高德的酒店POI ID")
+    reason: str = Field(..., description="推荐原因")
+
+class HotelSelection(BaseModel):
+    hotels: List[RankedHotel] = Field(
+        default_factory=list,
+        description="酒店Agent从候选酒店中选出的结果",
+    )
 
 class DayPlan(BaseModel):
     """单日行程"""
