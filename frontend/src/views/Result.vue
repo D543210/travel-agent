@@ -801,10 +801,20 @@ const exportAsPDF = async () => {
 // 初始化地图
 const initMap = async () => {
   try {
+    ;(window as any)._AMapSecurityConfig = {
+      securityJsCode: import.meta.env.VITE_AMAP_SECURITY_SECRET
+    }
+
     const AMap = await AMapLoader.load({
       key: import.meta.env.VITE_AMAP_WEB_JS_KEY,  // 高德地图Web端(JS API) Key
       version: '2.0',
-      plugins: ['AMap.Marker', 'AMap.Polyline', 'AMap.InfoWindow']
+      plugins: ['AMap.Marker',
+                'AMap.Polyline',
+                'AMap.InfoWindow',
+                'AMap.Walking',
+                'AMap.Driving',
+                'AMap.Transfer'
+              ]
     })
 
     // 创建地图实例
@@ -838,7 +848,8 @@ const addAttractionMarkers = (AMap: any) => {
         allAttractions.push({
           ...attraction,
           dayIndex,
-          attrIndex
+          attrIndex,
+          transportation: day.transportation
         })
       }
     })
@@ -886,15 +897,179 @@ const addAttractionMarkers = (AMap: any) => {
   }
 
   // 绘制路线
-  drawRoutes(AMap, allAttractions)
+  drawRoutes(AMap, allAttractions,tripPlan.value.city)
+}
+
+//步行路线
+const drawWalkingSegment = (
+  AMap: any,
+  origin: any,
+  destination: any
+) => {
+  return new Promise((resolve, reject) => {
+    const walking = new AMap.Walking({
+      map,
+      autoFitView: false
+    })
+
+    const start = new AMap.LngLat(
+      origin.location.longitude,
+      origin.location.latitude
+    )
+
+    const end = new AMap.LngLat(
+      destination.location.longitude,
+      destination.location.latitude
+    )
+
+    walking.search(
+      start,
+      end,
+      (status: string, result: any) => {
+        if (status === 'complete') {
+          resolve(result)
+          return
+        }
+
+        reject(
+          new Error(
+            `步行路线规划失败：${result?.info || status}`
+          )
+        )
+      }
+    )
+  })
+}
+
+//驾车路线
+const drawDrivingSegment = (
+  AMap: any,
+  origin: any,
+  destination: any
+) => {
+  return new Promise((resolve, reject) => {
+    const driving = new AMap.Driving({
+      map,
+      autoFitView: false
+    })
+
+    const start = new AMap.LngLat(
+      origin.location.longitude,
+      origin.location.latitude
+    )
+
+    const end = new AMap.LngLat(
+      destination.location.longitude,
+      destination.location.latitude
+    )
+
+    driving.search(start, end, (status: string, result: any) => {
+      if (status === 'complete') {
+        resolve(result)
+        return
+      }
+
+      reject(
+        new Error(
+          `驾车路线规划失败：${result?.info || status}`
+        )
+      )
+    })
+  })
+}
+
+
+//公交路线
+const drawTransitSegment = (
+  AMap: any,
+  origin: any,
+  destination: any,
+  city: string
+) => {
+  return new Promise((resolve, reject) => {
+    const transfer = new AMap.Transfer({
+      map,
+      city,
+      autoFitView: false
+    })
+
+    const start = new AMap.LngLat(
+      origin.location.longitude,
+      origin.location.latitude
+    )
+
+    const end = new AMap.LngLat(
+      destination.location.longitude,
+      destination.location.latitude
+    )
+
+    transfer.search(start, end, (status: string, result: any) => {
+      if (status === 'complete') {
+        resolve(result)
+        return
+      }
+
+      reject(
+        new Error(
+          `公交路线规划失败：${result?.info || status}`
+        )
+      )
+    })
+  })
+}
+
+
+//交通方式统一入口
+const drawRouteSegment = (
+  AMap: any,
+  origin: any,
+  destination: any,
+  transportation: string,
+  city: string
+): Promise<unknown> => {
+  if (transportation.includes('步行')) {
+    return drawWalkingSegment(
+      AMap,
+      origin,
+      destination
+    )
+  }
+
+  if (
+    transportation.includes('驾车') ||
+    transportation.includes('自驾')
+  ) {
+    return drawDrivingSegment(
+      AMap,
+      origin,
+      destination
+    )
+  }
+
+  if (
+    transportation.includes('公共交通') ||
+    transportation.includes('公交') ||
+    transportation.includes('地铁')
+  ) {
+    return drawTransitSegment(
+      AMap,
+      origin,
+      destination,
+      city
+    )
+  }
+
+  return Promise.reject(
+    new Error(`不支持的交通方式：${transportation}`)
+  )
 }
 
 // 绘制路线
-const drawRoutes = (AMap: any, attractions: any[]) => {
+const drawRoutes = async (AMap: any, attractions: any[],city:string) => {
   if (attractions.length < 2) return
 
   // 按天分组绘制路线
-  const dayGroups: any = {}
+  const dayGroups: Record<number, any[]> = {}
   attractions.forEach(attr => {
     if (!dayGroups[attr.dayIndex]) {
       dayGroups[attr.dayIndex] = []
@@ -906,21 +1081,24 @@ const drawRoutes = (AMap: any, attractions: any[]) => {
   Object.values(dayGroups).forEach((dayAttractions: any) => {
     if (dayAttractions.length < 2) return
 
-    const path = dayAttractions.map((attr: any) => [
-      attr.location.longitude,
-      attr.location.latitude
-    ])
+    for(
+      let index = 0;
+      index < dayAttractions.length - 1;
+      index++
+    ){
+      const origin = dayAttractions[index]
+      const destination = dayAttractions[index + 1]
 
-    const polyline = new AMap.Polyline({
-      path: path,
-      strokeColor: '#1890ff',
-      strokeWeight: 4,
-      strokeOpacity: 0.8,
-      strokeStyle: 'solid',
-      showDir: true // 显示方向箭头
-    })
+      drawRouteSegment(AMap,origin,destination,origin.transportation,city).catch(error => {
+        console.error(
+          `${origin.name} → ${destination.name} 路线绘制失败`,
+          error
+        )
+      })
 
-    map.add(polyline)
+
+
+    }
   })
 }
 </script>
@@ -1400,4 +1578,3 @@ const drawRoutes = (AMap: any, attractions: any[]) => {
   }
 }
 </style>
-

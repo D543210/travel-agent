@@ -236,10 +236,10 @@ const formData = reactive<TripFormState>({
 watch([() => formData.start_date, () => formData.end_date], ([start, end]) => {
   if (start && end) {
     const days = end.diff(start, 'day') + 1
-    if (days > 0 && days <= 30) {
+    if (days > 0 && days <= 5) {
       formData.travel_days = days
-    } else if (days > 30) {
-      message.warning('旅行天数不能超过30天')
+    } else if (days > 5) {
+      message.warning('旅行天数不能超过5天')
       formData.end_date = null
     } else {
       message.warning('结束日期不能早于开始日期')

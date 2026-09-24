@@ -21,7 +21,7 @@ class Settings(BaseSettings):
 
     # 应用基本配置
     app_name: str = "HelloAgents智能旅行助手"
-    app_version: str = "1.1.0"
+    app_version: str = "1.3.0"
     debug: bool = False
 
     # 服务器配置

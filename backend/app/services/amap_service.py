@@ -4,8 +4,10 @@ from dbm import error
 from typing import List, Dict, Any, Optional
 from hello_agents.tools import MCPTool
 from ..config import get_settings
-from ..models.schemas import Location, POIInfo, WeatherInfo
+from ..models.schemas import Location, POIInfo, WeatherInfo,RouteInfo
 from .mcp_response_parser import extract_json_value
+
+import requests
 #将MCP返回的JSON字符串转换成Python对象(dict)
 import json
 # 全局MCP工具实例
@@ -14,10 +16,10 @@ _amap_mcp_tool = None
 def parse_location(value:Any)->Location:
     """
     将MCP返回的坐标数据解析为Location对象
-    
+
     Args:
         value: MCP返回的坐标数据
-    
+
     Returns:
         Location对象
     """
@@ -42,6 +44,179 @@ def parse_location(value:Any)->Location:
         raise ValueError(f"纬度超出范围: {latitude}")
 
     return Location(longitude=longitude, latitude=latitude)
+
+def parse_route_result(
+        raw_result: str,
+        route_type: str,
+) -> RouteInfo:
+    data = extract_json_value(raw_result)
+
+    if not isinstance(data, dict):
+        raise ValueError("路线响应不是JSON对象")
+    
+    route = data.get("route")
+
+    if not isinstance(route, dict):
+        raise ValueError("路线响应缺少route对象")
+    
+    paths = route.get("paths")
+
+    if not isinstance(paths, list) or not paths:
+        raise ValueError("路线响应没有可用路径")
+
+    first_path = paths[0]
+
+    if not isinstance(first_path, dict):
+        raise ValueError("路线数据格式错误")
+
+    distance_value = first_path.get("distance")
+    duration_value = first_path.get("duration")
+
+    if distance_value is None:
+        raise ValueError("路线响应缺少distance")
+
+    if duration_value is None:
+        raise ValueError("路线响应缺少duration")
+
+    try:
+        distance = float(distance_value)
+        duration = int(duration_value)
+
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            "路线距离或耗时不是合法数字"
+        ) from error
+
+    raw_steps = first_path.get("steps", [])
+
+    if not isinstance(raw_steps, list):
+        raise ValueError("路线steps不是数组")
+
+    instructions = []
+
+    for step in raw_steps:
+        if not isinstance(step, dict):
+            continue
+
+        instruction = step.get("instruction")
+
+        if isinstance(instruction, str) and instruction.strip():
+            instructions.append(instruction.strip())
+
+    description = "；".join(instructions)
+
+    return RouteInfo(
+        distance=distance,
+        duration=duration,
+        route_type=route_type,
+        description=description,
+    )
+
+
+def parse_transit_route_result(
+    data: Any,
+) -> RouteInfo:
+    if not isinstance(data, dict):
+        raise ValueError("公交路线响应不是JSON对象")
+
+    if data.get("status") != "1":
+        info = data.get("info", "未知错误")
+        infocode = data.get("infocode", "")
+        raise ValueError(
+            f"公交路线查询失败: {info} ({infocode})"
+        )
+
+    route = data.get("route")
+
+    if not isinstance(route, dict):
+        raise ValueError("公交路线响应缺少route对象")
+
+    transits = route.get("transits")
+
+    if not isinstance(transits, list) or not transits:
+        raise ValueError("公交路线响应没有可用方案")
+
+    first_transit = transits[0]
+
+    if not isinstance(first_transit, dict):
+        raise ValueError("公交方案格式错误")
+
+    distance_value = route.get("distance")
+    duration_value = first_transit.get("duration")
+
+    if distance_value is None:
+        raise ValueError("公交路线缺少总距离")
+
+    if duration_value is None:
+        raise ValueError("公交路线缺少总耗时")
+
+    try:
+        distance = float(distance_value)
+        duration = int(duration_value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            "公交路线距离或耗时不是合法数字"
+        ) from error
+
+    description_parts = []
+
+    segments = first_transit.get("segments", [])
+
+    if isinstance(segments, list):
+        for segment in segments:
+            if not isinstance(segment, dict):
+                continue
+
+            walking = segment.get("walking")
+
+            if isinstance(walking, dict):
+                walking_distance = walking.get("distance")
+
+                try:
+                    walking_distance_number = int(
+                        walking_distance or 0
+                    )
+                except (TypeError, ValueError):
+                    walking_distance_number = 0
+
+                if walking_distance_number > 0:
+                    description_parts.append(
+                        f"步行{walking_distance_number}米"
+                    )
+
+            bus = segment.get("bus")
+
+            if not isinstance(bus, dict):
+                continue
+
+            buslines = bus.get("buslines")
+
+            if not isinstance(buslines, list) or not buslines:
+                continue
+
+            first_busline = buslines[0]
+
+            if not isinstance(first_busline, dict):
+                continue
+
+            line_name = first_busline.get("name")
+
+            if isinstance(line_name, str) and line_name.strip():
+                description_parts.append(
+                    f"乘坐{line_name.strip()}"
+                )
+
+    description = "；".join(description_parts)
+
+    if not description:
+        description = "公共交通路线"
+
+    return RouteInfo(
+        distance=distance,
+        duration=duration,
+        route_type="transit",
+        description=description,
+    )
 
 def parse_poi_detail(data:Dict[str,Any])->POIInfo:
     """
@@ -118,7 +293,106 @@ class AmapService:
     def __init__(self):
         """初始化服务"""
         self.mcp_tool = get_amap_mcp_tool()
-    
+
+
+    def _geocode_direct(
+        self,
+        address: str,
+        city: Optional[str] = None,
+    ) -> str:
+        settings = get_settings()
+
+        params = {
+            "key": settings.amap_api_key,
+            "address": address,
+        }
+
+        if city:
+            params["city"] = city
+
+        response = requests.get(
+            "https://restapi.amap.com/v3/geocode/geo",
+            params=params,
+            timeout=(5, 20),
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        if data.get("status") != "1":
+            info = data.get("info", "未知错误")
+            infocode = data.get("infocode", "")
+            raise ValueError(
+                f"地址解析失败: {info} ({infocode})"
+            )
+
+        geocodes = data.get("geocodes")
+
+        if not isinstance(geocodes, list) or not geocodes:
+            raise ValueError(
+                f"没有找到地址坐标: {address}"
+            )
+
+        first_geocode = geocodes[0]
+
+        if not isinstance(first_geocode, dict):
+            raise ValueError("地理编码结果格式错误")
+
+        location = first_geocode.get("location")
+
+        if not isinstance(location, str) or not location.strip():
+            raise ValueError("地理编码结果缺少location")
+
+        # 复用已有函数校验坐标格式与范围
+        parse_location(location)
+
+        return location.strip()
+
+    def _plan_transit_route_direct(
+        self,
+        origin_address: str,
+        destination_address: str,
+        origin_city: Optional[str],
+        destination_city: Optional[str],
+    ) -> RouteInfo:
+        if not origin_city:
+            raise ValueError("公交路线缺少起点城市")
+
+        if not destination_city:
+            raise ValueError("公交路线缺少终点城市")
+
+        origin = self._geocode_direct(
+            origin_address,
+            origin_city,
+        )
+
+        destination = self._geocode_direct(
+            destination_address,
+            destination_city,
+        )
+
+        settings = get_settings()
+
+        response = requests.get(
+            "https://restapi.amap.com/v3/direction/transit/integrated",
+            params={
+                "key": settings.amap_api_key,
+                "origin": origin,
+                "destination": destination,
+                "city": origin_city,
+                "cityd": destination_city,
+                "extensions": "all",
+            },
+            timeout=(5, 20),
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        return parse_transit_route_result(data)
+
     def search_poi(self, keywords: str, city: str, citylimit: bool = True) -> List[POIInfo]:
         """
         搜索POI
@@ -254,7 +528,7 @@ class AmapService:
         origin_city: Optional[str] = None,
         destination_city: Optional[str] = None,
         route_type: str = "walking"
-    ) -> Dict[str, Any]:
+    ) -> RouteInfo:
         """
         规划路线
         
@@ -269,33 +543,39 @@ class AmapService:
             路线信息
         """
         try:
+            # 公共交通需要城市参数
+            if route_type == "transit":
+                return self._plan_transit_route_direct(
+                    origin_address=origin_address,
+                    destination_address=destination_address,
+                    origin_city=origin_city,
+                    destination_city=destination_city,
+                )
             # 根据路线类型选择工具
             tool_map = {
                 "walking": "maps_direction_walking_by_address",
                 "driving": "maps_direction_driving_by_address",
-                "transit": "maps_direction_transit_integrated_by_address"
             }
+
+            if route_type not in tool_map:
+                raise ValueError(
+                    f"不支持的路线类型: {route_type}"
+                )
             
-            tool_name = tool_map.get(route_type, "maps_direction_walking_by_address")
+            tool_name = tool_map[route_type]
             
             # 构建参数
             arguments = {
                 "origin_address": origin_address,
                 "destination_address": destination_address
             }
-            
-            # 公共交通需要城市参数
-            if route_type == "transit":
-                if origin_city:
-                    arguments["origin_city"] = origin_city
-                if destination_city:
-                    arguments["destination_city"] = destination_city
-            else:
-                # 其他路线类型也可以提供城市参数提高准确性
-                if origin_city:
-                    arguments["origin_city"] = origin_city
-                if destination_city:
-                    arguments["destination_city"] = destination_city
+
+
+            # 其他路线类型也可以提供城市参数提高准确性
+            if origin_city:
+                arguments["origin_city"] = origin_city
+            if destination_city:
+                arguments["destination_city"] = destination_city
             
             # 调用MCP工具
             result = self.mcp_tool.run({
@@ -307,11 +587,14 @@ class AmapService:
             print(f"路线规划结果: {result[:200]}...")
             
             # TODO: 解析实际的路线数据
-            return {}
+            return parse_route_result(
+                raw_result=result,
+                route_type=route_type,
+            )
             
         except Exception as e:
             print(f"❌ 路线规划失败: {str(e)}")
-            return {}
+            raise
     
     def geocode(self, address: str, city: Optional[str] = None) -> Optional[Location]:
         """
@@ -428,4 +711,3 @@ def get_amap_service() -> AmapService:
         _amap_service = AmapService()
     
     return _amap_service
-
