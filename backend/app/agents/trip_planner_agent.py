@@ -3,7 +3,6 @@
 import json
 from typing import Dict, Any, List
 from hello_agents import SimpleAgent
-from hello_agents.tools import MCPTool
 from ..services.llm_service import get_llm
 from ..models.schemas import (
     TripRequest,
@@ -13,7 +12,6 @@ from ..models.schemas import (
     AttractionSelection,
     HotelSelection
 )
-from ..config import get_settings
 from ..services.amap_service import get_amap_service
 from ..services.mcp_response_parser import extract_json_value,MCPResponseParseError
 from pydantic import ValidationError
@@ -183,19 +181,7 @@ class MultiAgentTripPlanner:
         print("🔄 开始初始化多智能体旅行规划系统...")
 
         try:
-            settings = get_settings()
             self.llm = get_llm()
-
-            # 创建共享的MCP工具(只创建一次)
-            print("  - 创建共享MCP工具...")
-            self.amap_tool = MCPTool(
-                name="amap",
-                description="高德地图服务",
-                server_command=["uvx", "amap-mcp-server"],
-                env={"AMAP_MAPS_API_KEY": settings.amap_api_key},
-                auto_expand=True
-            )
-            self.amap_tool.expandable=True
 
             # 创建景点搜索Agent
             print("  - 创建景点搜索Agent...")
@@ -545,6 +531,7 @@ class MultiAgentTripPlanner:
 
             # 解析最终计划
             trip_plan = self._parse_response(planner_response, request)
+            self._validate_plan_against_request(trip_plan, request)
 
             # 校验规划Agent使用的景点是否全部来自真实候选列表
             scheduled_poi_ids = set()
@@ -780,17 +767,32 @@ class MultiAgentTripPlanner:
             raise AgentOutputError(
                 "规划 Agent 返回的数据不符合 TripPlan 结构"
             ) from error
-    
-    
+
+
+    def _validate_plan_against_request(
+        self,
+        trip_plan: TripPlan,
+        request: TripRequest,
+    ) -> None:
+        """校验生成的行程是否与原始请求一致。"""
+
+        if trip_plan.city != request.city:
+            raise PlanValidationError("行程城市与请求城市不一致")
+
+        if trip_plan.start_date != request.start_date:
+            raise PlanValidationError("行程开始日期与请求不一致")
+
+        if trip_plan.end_date != request.end_date:
+            raise PlanValidationError("行程结束日期与请求不一致")
+
+        if len(trip_plan.days) != request.travel_days:
+            raise PlanValidationError(
+                f"行程天数不正确：期望{request.travel_days}天，"
+                f"实际{len(trip_plan.days)}天"
+            )
+
+
 # 全局多智能体系统实例
-_multi_agent_planner = None
-
-
-def get_trip_planner_agent() -> MultiAgentTripPlanner:
-    """获取多智能体旅行规划系统实例(单例模式)"""
-    global _multi_agent_planner
-
-    if _multi_agent_planner is None:
-        _multi_agent_planner = MultiAgentTripPlanner()
-
-    return _multi_agent_planner
+def create_trip_planner() -> MultiAgentTripPlanner:
+    """为每次请求创建独立的旅行规划器"""
+    return MultiAgentTripPlanner()

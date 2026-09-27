@@ -6,7 +6,7 @@ from ...models.schemas import (
     TripPlanResponse,
     ErrorResponse
 )
-from ...agents.trip_planner_agent import get_trip_planner_agent
+from ...agents.trip_planner_agent import create_trip_planner
 
 from ...exceptions import (
     AgentOutputError,
@@ -24,7 +24,7 @@ router = APIRouter(prefix="/trip", tags=["旅行规划"])
     summary="生成旅行计划",
     description="根据用户输入的旅行需求,生成详细的旅行计划"
 )
-async def plan_trip(request: TripRequest):
+def plan_trip(request: TripRequest):
     """
     生成旅行计划
 
@@ -44,7 +44,7 @@ async def plan_trip(request: TripRequest):
 
         # 获取Agent实例
         print("🔄 获取多智能体系统实例...")
-        agent = get_trip_planner_agent()
+        agent = create_trip_planner()
 
         # 生成旅行计划
         print("🚀 开始生成旅行计划...")
@@ -109,21 +109,10 @@ async def plan_trip(request: TripRequest):
     summary="健康检查",
     description="检查旅行规划服务是否正常"
 )
-async def health_check():
+def health_check():
     """健康检查"""
-    try:
-        # 检查Agent是否可用
-        agent = get_trip_planner_agent()
-        
-        return {
-            "status": "healthy",
-            "service": "trip-planner",
-            "agent_name": agent.agent.name,
-            "tools_count": len(agent.agent.list_tools())
-        }
-    except Exception as e:
-        raise HTTPException(
-            status_code=503,
-            detail=f"服务不可用: {str(e)}"
-        )
-
+    return {
+        "status": "healthy",
+        "service": "trip-planner",
+    }
+   
