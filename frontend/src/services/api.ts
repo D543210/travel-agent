@@ -35,6 +35,37 @@ apiClient.interceptors.response.use(
   }
 )
 
+
+interface AttractionPhotoResponse{
+  success: boolean
+  message: string
+  data?:{
+    name: string
+    photo_url: string | null
+  }
+}
+
+
+export async function getAttractionPhoto(
+  name: string
+): Promise<string | null>{
+  try{
+    const response =
+      await apiClient.get<AttractionPhotoResponse>(
+        '/api/poi/photo',
+        {
+          params:{
+            name
+          }
+        }
+      )
+      return response.data.data?.photo_url || null
+  }catch(error){
+    console.error(`获取${name}图片失败:`, error)
+    return null
+  }
+}
+
 /**
  * 生成旅行计划
  */
