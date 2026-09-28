@@ -1,6 +1,6 @@
 """数据模型定义"""
 
-from typing import List, Optional, Union
+from typing import List, Literal, Optional, Union
 from pydantic import (
     BaseModel,
     Field,
@@ -104,12 +104,15 @@ class Attraction(BaseModel):
 
 class Meal(BaseModel):
     """餐饮信息"""
-    type: str = Field(..., description="餐饮类型: breakfast/lunch/dinner/snack")
+    poi_id: str = Field(..., description="高德餐厅POI ID")
+    type: Literal["breakfast", "lunch", "dinner"] = Field(
+        ..., description="餐饮类型: breakfast/lunch/dinner"
+    )
     name: str = Field(..., description="餐饮名称")
     address: Optional[str] = Field(default=None, description="地址")
     location: Optional[Location] = Field(default=None, description="经纬度坐标")
     description: Optional[str] = Field(default=None, description="描述")
-    estimated_cost: int = Field(default=0, description="预估费用(元)")
+    estimated_cost: int = Field(default=0, ge=0, description="预估费用(元)")
 
 
 class Hotel(BaseModel):
@@ -122,7 +125,7 @@ class Hotel(BaseModel):
     rating: str = Field(default="", description="评分")
     distance: str = Field(default="", description="距离景点距离")
     type: str = Field(default="", description="酒店类型")
-    estimated_cost: int = Field(default=0, description="预估费用(元/晚)")
+    estimated_cost: int = Field(default=0, ge=0, description="预估费用(元/晚)")
 
 class RankedHotel(BaseModel):
     poi_id: str = Field(..., description="来自高德的酒店POI ID")
@@ -134,6 +137,31 @@ class HotelSelection(BaseModel):
         description="酒店Agent从候选酒店中选出的结果",
     )
 
+
+class RankedRestaurant(BaseModel):
+    poi_id: str = Field(..., description="来自高德的餐厅POI ID")
+    reason: str = Field(..., description="推荐原因")
+
+
+class RestaurantSelection(BaseModel):
+    restaurants: List[RankedRestaurant] = Field(
+        default_factory=list,
+        description="餐厅Agent从候选餐厅中选出的结果",
+    )
+
+
+class TravelLeg(BaseModel):
+    """两个可信POI之间的真实路线。"""
+
+    origin_poi_id: str
+    origin_name: str
+    destination_poi_id: str
+    destination_name: str
+    distance: float = Field(..., ge=0, description="距离(米)")
+    duration: int = Field(..., ge=0, description="时间(秒)")
+    route_type: Literal["walking", "driving", "transit"]
+    description: str = Field(default="", description="路线描述")
+
 class DayPlan(BaseModel):
     """单日行程"""
     date: str = Field(..., description="日期 YYYY-MM-DD")
@@ -142,8 +170,12 @@ class DayPlan(BaseModel):
     transportation: str = Field(..., description="交通方式")
     accommodation: str = Field(..., description="住宿")
     hotel: Optional[Hotel] = Field(default=None, description="推荐酒店")
-    attractions: List[Attraction] = Field(default=[], description="景点列表")
-    meals: List[Meal] = Field(default=[], description="餐饮列表")
+    attractions: List[Attraction] = Field(default_factory=list, description="景点列表")
+    meals: List[Meal] = Field(default_factory=list, description="餐饮列表")
+    travel_legs: List[TravelLeg] = Field(
+        default_factory=list,
+        description="当天由路线服务返回的真实路线",
+    )
 
 
 class WeatherInfo(BaseModel):
@@ -172,11 +204,11 @@ class WeatherInfo(BaseModel):
 
 class Budget(BaseModel):
     """预算信息"""
-    total_attractions: int = Field(default=0, description="景点门票总费用")
-    total_hotels: int = Field(default=0, description="酒店总费用")
-    total_meals: int = Field(default=0, description="餐饮总费用")
-    total_transportation: int = Field(default=0, description="交通总费用")
-    total: int = Field(default=0, description="总费用")
+    total_attractions: int = Field(default=0, ge=0, description="景点门票总费用")
+    total_hotels: int = Field(default=0, ge=0, description="酒店总费用")
+    total_meals: int = Field(default=0, ge=0, description="餐饮总费用")
+    total_transportation: int = Field(default=0, ge=0, description="交通总费用")
+    total: int = Field(default=0, ge=0, description="总费用")
 
 
 class TripPlan(BaseModel):
@@ -185,15 +217,23 @@ class TripPlan(BaseModel):
     start_date: str = Field(..., description="开始日期")
     end_date: str = Field(..., description="结束日期")
     days: List[DayPlan] = Field(..., description="每日行程")
-    weather_info: List[WeatherInfo] = Field(default=[], description="天气信息")
+    weather_info: List[WeatherInfo] = Field(default_factory=list, description="天气信息")
     overall_suggestions: str = Field(..., description="总体建议")
     budget: Optional[Budget] = Field(default=None, description="预算信息")
+    status: Literal["success", "degraded"] = Field(
+        default="success", description="计划生成状态"
+    )
+    warnings: List[str] = Field(default_factory=list, description="降级原因")
 
 
 class TripPlanResponse(BaseModel):
     """旅行计划响应"""
     success: bool = Field(..., description="是否成功")
+    status: Literal["success", "degraded", "failed"] = Field(
+        ..., description="请求结果状态"
+    )
     message: str = Field(default="", description="消息")
+    warnings: List[str] = Field(default_factory=list, description="降级原因")
     data: Optional[TripPlan] = Field(default=None, description="旅行计划数据")
 
 
@@ -235,8 +275,8 @@ class POISearchResponse(BaseModel):
 
 class RouteInfo(BaseModel):
     """路线信息"""
-    distance: float = Field(..., description="距离(米)")
-    duration: int = Field(..., description="时间(秒)")
+    distance: float = Field(..., ge=0, description="距离(米)")
+    duration: int = Field(..., ge=0, description="时间(秒)")
     route_type: str = Field(..., description="路线类型")
     description: str = Field(..., description="路线描述")
 
@@ -260,6 +300,6 @@ class WeatherResponse(BaseModel):
 class ErrorResponse(BaseModel):
     """错误响应"""
     success: bool = Field(default=False, description="是否成功")
+    status: Literal["failed"] = Field(default="failed", description="失败状态")
     message: str = Field(..., description="错误消息")
     error_code: Optional[str] = Field(default=None, description="错误代码")
-

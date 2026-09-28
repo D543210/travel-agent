@@ -6,6 +6,7 @@ export interface Location {
 }
 
 export interface Attraction {
+  poi_id?: string
   name: string
   address: string
   location: Location
@@ -18,12 +19,24 @@ export interface Attraction {
 }
 
 export interface Meal {
-  type: 'breakfast' | 'lunch' | 'dinner' | 'snack'
+  poi_id: string
+  type: 'breakfast' | 'lunch' | 'dinner'
   name: string
   address?: string
   location?: Location
   description?: string
   estimated_cost?: number
+}
+
+export interface TravelLeg {
+  origin_poi_id: string
+  origin_name: string
+  destination_poi_id: string
+  destination_name: string
+  distance: number
+  duration: number
+  route_type: 'walking' | 'driving' | 'transit'
+  description: string
 }
 
 export interface Hotel {
@@ -55,6 +68,7 @@ export interface DayPlan {
   hotel?: Hotel
   attractions: Attraction[]
   meals: Meal[]
+  travel_legs: TravelLeg[]
 }
 
 export interface WeatherInfo {
@@ -75,6 +89,8 @@ export interface TripPlan {
   weather_info: WeatherInfo[]
   overall_suggestions: string
   budget?: Budget
+  status: 'success' | 'degraded'
+  warnings: string[]
 }
 
 export interface TripFormData {
@@ -90,7 +106,8 @@ export interface TripFormData {
 
 export interface TripPlanResponse {
   success: boolean
+  status: 'success' | 'degraded' | 'failed'
   message: string
+  warnings: string[]
   data?: TripPlan
 }
-

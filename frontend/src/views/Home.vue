@@ -298,7 +298,11 @@ const handleSubmit = async () => {
       // 保存到sessionStorage
       sessionStorage.setItem('tripPlan', JSON.stringify(response.data))
 
-      message.success('旅行计划生成成功!')
+      if (response.status === 'degraded') {
+        message.warning(response.warnings.join('；') || response.message)
+      } else {
+        message.success('旅行计划生成成功!')
+      }
 
       // 短暂延迟后跳转
       setTimeout(() => {
@@ -651,4 +655,3 @@ const handleSubmit = async () => {
   }
 }
 </style>
-

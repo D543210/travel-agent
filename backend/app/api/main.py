@@ -1,9 +1,14 @@
 """FastAPI主应用"""
 
-from fastapi import FastAPI
+from uuid import uuid4
+from fastapi import FastAPI,Request
 from fastapi.middleware.cors import CORSMiddleware
 from ..config import get_settings, validate_config, print_config
 from .routes import trip, poi, map as map_routes
+from ..logging_context import (
+    reset_request_id,
+    set_request_id,
+)
 
 # 获取配置
 settings = get_settings()
@@ -24,7 +29,27 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Request-ID"],
 )
+
+@app.middleware("http")
+async def request_id_middleware(
+    request: Request,
+    call_next,
+):
+    """为每次HTTP请求设置独立的请求ID"""
+    request_id = (
+        request.headers.get("X-Request-ID")
+        or uuid4().hex[:12]
+    )
+
+    token = set_request_id(request_id)
+
+    try:
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        return response
+    finally: reset_request_id(token)
 
 # 注册路由
 app.include_router(trip.router, prefix="/api")

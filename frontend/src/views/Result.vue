@@ -63,6 +63,14 @@
 
       <!-- 主内容区 -->
       <div class="main-content">
+        <a-alert
+          v-if="tripPlan.status === 'degraded'"
+          type="warning"
+          show-icon
+          message="行程已生成，但部分外部信息不完整"
+          :description="tripPlan.warnings.join('；')"
+          style="margin-bottom: 16px"
+        />
         <!-- 顶部信息区:左侧概览+预算,右侧地图 -->
         <div class="top-info-section">
           <!-- 左侧:行程概览和预算明细 -->

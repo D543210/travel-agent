@@ -15,6 +15,9 @@ from ...exceptions import (
     TripPlanningError,
 )
 
+from ...logging_context import log
+from ...planning_concurrency import get_planning_capacity_limiter
+
 router = APIRouter(prefix="/trip", tags=["旅行规划"])
 
 
@@ -34,27 +37,49 @@ def plan_trip(request: TripRequest):
     Returns:
         旅行计划响应
     """
+    capacity_limiter = get_planning_capacity_limiter()
+
+    if not capacity_limiter.try_acquire():
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "status": "failed",
+                "code": "TOO_MANY_TRIP_PLANS",
+                "message": "当前规划任务较多，请稍后重试",
+            },
+            headers={"Retry-After": "5"},
+        )
+
     try:
-        print(f"\n{'='*60}")
-        print(f"📥 收到旅行规划请求:")
-        print(f"   城市: {request.city}")
-        print(f"   日期: {request.start_date} - {request.end_date}")
-        print(f"   天数: {request.travel_days}")
-        print(f"{'='*60}\n")
+        log("=" * 60)
+        log("📥 收到旅行规划请求")
+        log(f"城市: {request.city}")
+        log(
+            f"日期: {request.start_date} - "
+            f"{request.end_date}"
+        )
+        log(f"天数: {request.travel_days}")
+        log("=" * 60)
 
         # 获取Agent实例
-        print("🔄 获取多智能体系统实例...")
+        log("🔄 创建本次请求的多智能体系统")
         agent = create_trip_planner()
 
         # 生成旅行计划
-        print("🚀 开始生成旅行计划...")
+        log("🚀 开始生成旅行计划")
         trip_plan = agent.plan_trip(request)
 
-        print("✅ 旅行计划生成成功,准备返回响应\n")
+        log("✅ 旅行计划生成成功")
 
         return TripPlanResponse(
             success=True,
-            message="旅行计划生成成功",
+            status=trip_plan.status,
+            message=(
+                "旅行计划已生成，部分外部信息获取失败"
+                if trip_plan.status == "degraded"
+                else "旅行计划生成成功"
+            ),
+            warnings=trip_plan.warnings,
             data=trip_plan
         )
 
@@ -62,6 +87,7 @@ def plan_trip(request: TripRequest):
         raise HTTPException(
             status_code=503,
             detail={
+                "status": "failed",
                 "code": "EXTERNAL_SERVICE_UNAVAILABLE",
                 "message": "外部数据服务暂时不可用，请稍后重试",
             },
@@ -71,6 +97,7 @@ def plan_trip(request: TripRequest):
         raise HTTPException(
             status_code=502,
             detail={
+                "status": "failed",
                 "code": "AGENT_OUTPUT_INVALID",
                 "message": "模型生成结果未通过结构校验，请重新生成",
             },
@@ -80,6 +107,7 @@ def plan_trip(request: TripRequest):
         raise HTTPException(
             status_code=502,
             detail={
+                "status": "failed",
                 "code": "PLAN_VALIDATION_FAILED",
                 "message": "生成的行程未通过可靠性校验，请重新生成",
             },
@@ -89,6 +117,7 @@ def plan_trip(request: TripRequest):
         raise HTTPException(
             status_code=500,
             detail={
+                "status": "failed",
                 "code": "TRIP_PLANNING_FAILED",
                 "message": "旅行规划失败，请稍后重试",
             },
@@ -98,10 +127,13 @@ def plan_trip(request: TripRequest):
         raise HTTPException(
             status_code=500,
             detail={
+                "status": "failed",
                 "code": "INTERNAL_ERROR",
                 "message": "系统内部错误",
             },
         )
+    finally:
+        capacity_limiter.release()
 
 
 @router.get(

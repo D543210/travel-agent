@@ -3,6 +3,7 @@
 import os
 from pathlib import Path
 from typing import List
+from pydantic import Field
 from pydantic_settings import BaseSettings
 from dotenv import load_dotenv
 
@@ -21,12 +22,15 @@ class Settings(BaseSettings):
 
     # 应用基本配置
     app_name: str = "HelloAgents智能旅行助手"
-    app_version: str = "1.3.0"
+    app_version: str = "1.4.0"
     debug: bool = False
 
     # 服务器配置
     host: str = "0.0.0.0"
     port: int = 8000
+    max_concurrent_trip_plans: int = Field(default=4, ge=1, le=100)
+    daily_available_minutes: int = Field(default=720, ge=60, le=1440)
+    daily_meal_buffer_minutes: int = Field(default=180, ge=0, le=480)
 
     # CORS配置 - 使用字符串,在代码中分割
     cors_origins: str = "http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173,http://127.0.0.1:3000"
@@ -108,4 +112,3 @@ def print_config():
     print(f"LLM Base URL: {llm_base_url}")
     print(f"LLM Model: {llm_model}")
     print(f"日志级别: {settings.log_level}")
-
