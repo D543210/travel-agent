@@ -840,6 +840,19 @@ const initMap = async () => {
   }
 }
 
+// 高德 InfoWindow 会把 content 当作 HTML 解析，外部 POI 和模型文本必须先转义。
+const escapeHtml = (value: unknown): string => {
+  const entities: Record<string, string> = {
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+  }
+
+  return String(value ?? '').replace(/[&<>"']/g, character => entities[character] ?? character)
+}
+
 // 添加景点标记
 const addAttractionMarkers = (AMap: any) => {
   if (!tripPlan.value) return
@@ -876,10 +889,10 @@ const addAttractionMarkers = (AMap: any) => {
     const infoWindow = new AMap.InfoWindow({
       content: `
         <div style="padding: 10px;">
-          <h4 style="margin: 0 0 8px 0;">${attraction.name}</h4>
-          <p style="margin: 4px 0;"><strong>地址:</strong> ${attraction.address}</p>
-          <p style="margin: 4px 0;"><strong>游览时长:</strong> ${attraction.visit_duration}分钟</p>
-          <p style="margin: 4px 0;"><strong>描述:</strong> ${attraction.description}</p>
+          <h4 style="margin: 0 0 8px 0;">${escapeHtml(attraction.name)}</h4>
+          <p style="margin: 4px 0;"><strong>地址:</strong> ${escapeHtml(attraction.address)}</p>
+          <p style="margin: 4px 0;"><strong>游览时长:</strong> ${escapeHtml(attraction.visit_duration)}分钟</p>
+          <p style="margin: 4px 0;"><strong>描述:</strong> ${escapeHtml(attraction.description)}</p>
           <p style="margin: 4px 0; color: #1890ff;"><strong>第${attraction.dayIndex + 1}天 景点${attraction.attrIndex + 1}</strong></p>
         </div>
       `,

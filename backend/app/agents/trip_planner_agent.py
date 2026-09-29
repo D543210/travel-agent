@@ -24,11 +24,19 @@ from pydantic import ValidationError
 from ..exceptions import (
     AgentOutputError,
     ExternalServiceError,
+    PlanFeasibilityError,
     PlanValidationError,
     TripPlanningError,
 )
 
+from .tool_decision import run_tool_decisions
+
 from ..logging_context import log
+
+# 修正时最多缩短原建议时长的20%；低于90分钟的建议不再缩短。
+MAX_VISIT_REDUCTION_RATIO = 0.20
+MIN_REPAIRED_VISIT_MINUTES = 90
+
 # ============ Agent提示词 ============
 
 ATTRACTION_AGENT_PROMPT = """你是景点筛选专家。
@@ -294,6 +302,42 @@ class MultiAgentTripPlanner:
                 f"{len(attraction_candidates)}个"
             )
 
+            # 步骤2: 通过天气service查询天气信息
+            log("🌤️ 步骤2: 查询天气")
+
+            # 使用高德服务直接查询天气
+            weather_info_list : List[WeatherInfo] = []
+
+            try:
+                weather_info_list = amap_service.get_weather(request.city)
+                print("Service天气数量：",len(weather_info_list))
+
+            except Exception as e:
+                print(f"⚠️ 天气查询失败，继续生成无天气行程: {str(e)}")
+                warnings.append("天气服务不可用，行程未包含天气信息")
+
+            weather_response = json.dumps(
+                [weather.model_dump() for weather in weather_info_list],
+                ensure_ascii=False,
+                indent=2
+            )
+            print(f"天气查询结果: {weather_response[:200]}...\n")
+
+
+            decision_result = run_tool_decisions(
+                request=request,
+                initial_candidates=attraction_candidates,
+                weather=weather_info_list,
+                amap_service=amap_service,
+                llm=self.llm,
+                route_type=self._route_type_for_transportation(
+                    request.transportation
+                ),
+            )
+
+            attraction_candidates = decision_result.candidates
+            route_hints = decision_result.route_hints
+
 
             minimum_required = request.travel_days * 2
             maximum_required = min(len(attraction_candidates), request.travel_days * 3,)
@@ -308,7 +352,8 @@ class MultiAgentTripPlanner:
 
             attraction_query = self._build_attraction_query(
                 request=request,
-                candidates=attraction_candidates
+                candidates=attraction_candidates,
+                route_hints=route_hints,
             )
 
             try:
@@ -411,26 +456,7 @@ class MultiAgentTripPlanner:
                 ensure_ascii=False,
                 indent=2
             )
-            # 步骤2: 通过天气service查询天气信息
-            log("🌤️ 步骤2: 查询天气")
 
-            # 使用高德服务直接查询天气
-            weather_info_list : List[WeatherInfo] = []
-
-            try:
-                weather_info_list = amap_service.get_weather(request.city)
-                print("Service天气数量：",len(weather_info_list))
-
-            except Exception as e:
-                print(f"⚠️ 天气查询失败，继续生成无天气行程: {str(e)}")
-                warnings.append("天气服务不可用，行程未包含天气信息")
-           
-            weather_response = json.dumps(
-                [weather.model_dump() for weather in weather_info_list],
-                ensure_ascii=False,
-                indent=2
-            )
-            print(f"天气查询结果: {weather_response[:200]}...\n")
 
             # 步骤3: 酒店推荐Agent搜索酒店
             log("🏨 步骤3: 搜索酒店")
@@ -653,102 +679,81 @@ class MultiAgentTripPlanner:
                 ) from error
             print(f"行程规划结果: {planner_response[:300]}...\n")
 
-            # 解析最终计划
-            trip_plan = self._parse_response(planner_response, request)
-            self._validate_plan_against_request(trip_plan, request)
-
-            # 校验规划Agent使用的景点是否全部来自真实候选列表
-            scheduled_poi_ids = set()
-
-            for day in trip_plan.days:
-
-                # 酒店校验
-                if day.hotel is None:
-                    raise PlanValidationError(
-                        f"第{day.day_index + 1}天缺少酒店"
+            # 只在真实路线导致超时的情况下给规划 Agent 一次修正机会。
+            # 两次校验共用路线缓存，避免重复请求相同的地图路线。
+            route_cache = {}
+            for attempt in range(2):
+                trip_plan = self._parse_response(planner_response, request)
+                try:
+                    route_warnings = self._validate_and_hydrate_generated_plan(
+                        trip_plan=trip_plan,
+                        request=request,
+                        candidate_by_id=candidate_by_id,
+                        selected_id_set=selected_id_set,
+                        selected_by_id=selected_by_id,
+                        selected_hotel_id_set=selected_hotel_id_set,
+                        candidate_hotel_by_id=candidate_hotel_by_id,
+                        selected_restaurant_id_set=selected_restaurant_id_set,
+                        candidate_restaurant_by_id=candidate_restaurant_by_id,
+                        restaurant_reason_by_id=restaurant_reason_by_id,
+                        amap_service=amap_service,
+                        route_cache=route_cache,
+                        allow_duration_adjustment=(attempt == 1),
                     )
-
-                if not day.hotel.poi_id:
-                    raise PlanValidationError(
-                        f"第{day.day_index + 1}天的酒店缺少poi_id"
+                except PlanFeasibilityError as error:
+                    if attempt == 1:
+                        raise
+                    log(f"行程超时，要求规划 Agent 修正一次: {error}")
+                    repair_feedback = {
+                        "day_index": error.day_index,
+                        "visit_minutes": error.visit_minutes,
+                        "route_minutes": error.route_minutes,
+                        "meal_minutes": error.meal_minutes,
+                        "available_minutes": error.available_minutes,
+                        "over_minutes": (
+                            error.visit_minutes + error.route_minutes
+                            + error.meal_minutes - error.available_minutes
+                        ),
+                        "attractions": error.attractions,
+                        "routes": error.routes,
+                        "allowed_visit_minutes": [
+                            {
+                                "poi_id": item.poi_id,
+                                "minimum": self._minimum_repaired_visit_minutes(
+                                    item.suggested_duration
+                                ),
+                                "maximum": item.suggested_duration,
+                            }
+                            for item in selected_by_id.values()
+                        ],
+                    }
+                    repair_query = (
+                        planner_query
+                        + "\n\n**修正上次行程（只允许一次）:**\n"
+                        + "上次行程根据真实地图路线校验后超时。"
+                        + "本次修正每天只能安排2个景点，不能保留造成超时的三景点组合。"
+                        + "优先替换路线耗时最长的景点或选择更近的已选酒店，"
+                        + "同时调整景点顺序，预留酒店往返和三餐时间。"
+                        + "可以在校验反馈的allowed_visit_minutes范围内"
+                        + "为每个景点重新填写visit_duration；请计算总时间，"
+                        + "让景点停留、真实路线和三餐预留不超过每日上限。"
+                        + "生成完整的新JSON行程，"
+                        + "不要使用未提供的景点、酒店或餐厅POI ID。"
+                        + "保持日期、三餐和预算结构完整。\n"
+                        + "校验反馈: "
+                        + json.dumps(repair_feedback, ensure_ascii=False)
+                        + "\n上次行程: "
+                        + trip_plan.model_dump_json()
                     )
-
-                if day.hotel.poi_id not in selected_hotel_id_set:
-                    raise PlanValidationError(
-                        f"第{day.day_index + 1}天使用了"
-                        f"酒店Agent未选中的POI ID：{day.hotel.poi_id}"
-                    )
-
-                source_hotel = candidate_hotel_by_id[day.hotel.poi_id]
-
-                # 用高德真实数据覆盖规划Agent输出
-                day.hotel.name = source_hotel.name
-                day.hotel.address = source_hotel.address
-                day.hotel.location = source_hotel.location.model_copy(deep=True)
-                day.hotel.type = source_hotel.type
-
-
-
-                attraction_count = len(day.attractions)
-
-                if attraction_count < 2 or attraction_count > 3:
-                    raise PlanValidationError(
-                        f"第{day.day_index + 1}天的景点数量不合理: "
-                        f"{attraction_count}个，要求每天2到3个"
-                    )
-                
-                for attraction in day.attractions:
-                    if not attraction.poi_id:
-                        raise PlanValidationError(
-                            f"第{day.day_index + 1}天的景点"
-                            f"“{attraction.name}”缺少poi_id"
-                        )
-
-                    if attraction.poi_id not in candidate_by_id:
-                        raise PlanValidationError(
-                            f"第{day.day_index + 1}天使用了未知景点POI ID: "
-                            f"{attraction.poi_id}"
-                        )
-                    
-                    if attraction.poi_id not in selected_id_set:
-                        raise PlanValidationError(
-                            f"第{day.day_index + 1}天使用了"
-                            f"景点Agent未选中的POI ID："
-                            f"{attraction.poi_id}"
-                        )
-                    
-                    if attraction.poi_id in scheduled_poi_ids:
-                        raise PlanValidationError(
-                            f"景点被重复安排: {attraction.poi_id}"
-                        )
-
-                    scheduled_poi_ids.add(attraction.poi_id)
-
-                    source_poi = candidate_by_id[attraction.poi_id]
-
-                    selected = selected_by_id[attraction.poi_id]
-
-                    attraction.name = source_poi.name
-                    attraction.address = source_poi.address
-                    attraction.location = source_poi.location.model_copy(deep=True)
-                    attraction.category = source_poi.type
-                    attraction.visit_duration = (selected.suggested_duration)
-                    attraction.description = selected.reason
-
-                self._validate_and_hydrate_meals(
-                    day=day,
-                    selected_restaurant_id_set=selected_restaurant_id_set,
-                    candidate_restaurant_by_id=candidate_restaurant_by_id,
-                    restaurant_reason_by_id=restaurant_reason_by_id,
-                )
-
-                route_warnings = self._populate_routes_and_validate_feasibility(
-                    day=day,
-                    city=request.city,
-                    requested_transportation=request.transportation,
-                    amap_service=amap_service,
-                )
+                    try:
+                        planner_response = self.planner_agent.run(repair_query)
+                    except Exception as model_error:
+                        raise ExternalServiceError(
+                            "行程修正模型暂时不可用"
+                        ) from model_error
+                    continue
                 warnings.extend(route_warnings)
+                break
             trusted_weather_info = [
                 weather
                 for weather in weather_info_list
@@ -771,7 +776,145 @@ class MultiAgentTripPlanner:
             print(f"❌ 生成旅行计划失败: {str(e)}")
             raise
     
-    def _build_attraction_query(self, request: TripRequest,candidates:List[POIInfo]) -> str:
+    def _validate_and_hydrate_generated_plan(
+        self,
+        *,
+        trip_plan: TripPlan,
+        request: TripRequest,
+        candidate_by_id: Dict[str, POIInfo],
+        selected_id_set: set[str],
+        selected_by_id: Dict[str, Any],
+        selected_hotel_id_set: set[str],
+        candidate_hotel_by_id: Dict[str, POIInfo],
+        selected_restaurant_id_set: set[str],
+        candidate_restaurant_by_id: Dict[str, POIInfo],
+        restaurant_reason_by_id: Dict[str, str],
+        amap_service,
+        route_cache: dict,
+        allow_duration_adjustment: bool = False,
+    ) -> List[str]:
+        """每次都从头校验并回填可信 POI；修正计划也走同一套校验。"""
+        warnings: List[str] = []
+        self._validate_plan_against_request(trip_plan, request)
+
+        # 校验规划Agent使用的景点是否全部来自真实候选列表
+        scheduled_poi_ids = set()
+
+        for day in trip_plan.days:
+
+            # 酒店校验
+            if day.hotel is None:
+                raise PlanValidationError(
+                    f"第{day.day_index + 1}天缺少酒店"
+                )
+
+            if not day.hotel.poi_id:
+                raise PlanValidationError(
+                    f"第{day.day_index + 1}天的酒店缺少poi_id"
+                )
+
+            if day.hotel.poi_id not in selected_hotel_id_set:
+                raise PlanValidationError(
+                    f"第{day.day_index + 1}天使用了"
+                    f"酒店Agent未选中的POI ID：{day.hotel.poi_id}"
+                )
+
+            source_hotel = candidate_hotel_by_id[day.hotel.poi_id]
+
+            # 用高德真实数据覆盖规划Agent输出
+            day.hotel.name = source_hotel.name
+            day.hotel.address = source_hotel.address
+            day.hotel.location = source_hotel.location.model_copy(deep=True)
+            day.hotel.type = source_hotel.type
+
+
+
+            attraction_count = len(day.attractions)
+
+            if attraction_count < 2 or attraction_count > 3:
+                raise PlanValidationError(
+                    f"第{day.day_index + 1}天的景点数量不合理: "
+                    f"{attraction_count}个，要求每天2到3个"
+                )
+
+            for attraction in day.attractions:
+                if not attraction.poi_id:
+                    raise PlanValidationError(
+                        f"第{day.day_index + 1}天的景点"
+                        f"“{attraction.name}”缺少poi_id"
+                    )
+
+                if attraction.poi_id not in candidate_by_id:
+                    raise PlanValidationError(
+                        f"第{day.day_index + 1}天使用了未知景点POI ID: "
+                        f"{attraction.poi_id}"
+                    )
+
+                if attraction.poi_id not in selected_id_set:
+                    raise PlanValidationError(
+                        f"第{day.day_index + 1}天使用了"
+                        f"景点Agent未选中的POI ID："
+                        f"{attraction.poi_id}"
+                    )
+
+                if attraction.poi_id in scheduled_poi_ids:
+                    raise PlanValidationError(
+                        f"景点被重复安排: {attraction.poi_id}"
+                    )
+
+                scheduled_poi_ids.add(attraction.poi_id)
+
+                source_poi = candidate_by_id[attraction.poi_id]
+
+                selected = selected_by_id[attraction.poi_id]
+
+                attraction.name = source_poi.name
+                attraction.address = source_poi.address
+                attraction.location = source_poi.location.model_copy(deep=True)
+                attraction.category = source_poi.type
+                if allow_duration_adjustment:
+                    # 只在修正轮允许模型缩短“建议”时长；地点事实仍由 POI 回填。
+                    minimum = self._minimum_repaired_visit_minutes(
+                        selected.suggested_duration
+                    )
+                    if not minimum <= attraction.visit_duration <= selected.suggested_duration:
+                        raise PlanValidationError(
+                            f"景点{source_poi.name}的修正停留时间"
+                            f"必须在{minimum}至{selected.suggested_duration}分钟之间"
+                        )
+                else:
+                    attraction.visit_duration = selected.suggested_duration
+                attraction.description = selected.reason
+
+            self._validate_and_hydrate_meals(
+                day=day,
+                selected_restaurant_id_set=selected_restaurant_id_set,
+                candidate_restaurant_by_id=candidate_restaurant_by_id,
+                restaurant_reason_by_id=restaurant_reason_by_id,
+            )
+
+            route_warnings = self._populate_routes_and_validate_feasibility(
+                day=day,
+                city=request.city,
+                requested_transportation=request.transportation,
+                amap_service=amap_service,
+                route_cache=route_cache,
+            )
+            warnings.extend(route_warnings)
+        return warnings
+
+    @staticmethod
+    def _minimum_repaired_visit_minutes(suggested_duration: int) -> int:
+        """防止模型通过极短停留时间凑过每日时间预算。"""
+        return min(
+            suggested_duration,
+            max(
+                MIN_REPAIRED_VISIT_MINUTES,
+                ceil(suggested_duration * (1 - MAX_VISIT_REDUCTION_RATIO)),
+            ),
+        )
+
+    def _build_attraction_query(self, request: TripRequest,candidates:List[POIInfo],route_hints: List[str] | None = None,) -> str:
         """把真实POI候选数据传给景点Agent进行筛选"""
 
         candidate_data = [
@@ -791,6 +934,9 @@ class MultiAgentTripPlanner:
             request.travel_days * 3,
         )
 
+
+        route_hint_text = "\n".join(route_hints or []) or "无"
+
         return f"""请从候选景点中选择适合本次旅行的景点。
 
 旅行信息：
@@ -800,11 +946,15 @@ class MultiAgentTripPlanner:
 - 最少选择数量：{minimum_required}个
 - 最多选择数量：{maximum_required}个
 
+
 候选景点：
 {candidate_json}
 
 只允许选择候选列表中的POI ID。
 选择数量必须在{minimum_required}到{maximum_required}之间。
+
+候选景点之间的路线预查信息（仅作筛选参考）：
+{route_hint_text}
 
 请严格按照系统提示词规定的JSON格式返回结果。
 """
@@ -878,6 +1028,11 @@ class MultiAgentTripPlanner:
         restaurants: str = "",
     ) -> str:
         """构建行程规划查询"""
+        settings = get_settings()
+        route_budget = (
+            settings.daily_available_minutes
+            - settings.daily_meal_buffer_minutes
+        )
         query = f"""请根据以下信息生成{request.city}的{request.travel_days}天旅行计划:
 
 **基本信息:**
@@ -900,13 +1055,22 @@ class MultiAgentTripPlanner:
 **餐厅信息:**
 {restaurants}
 
+**每日时间预算（必须遵守）:**
+- 每日可用时间：{settings.daily_available_minutes}分钟。
+- 早、中、晚餐固定预留：{settings.daily_meal_buffer_minutes}分钟。
+- 景点游览与全部交通路线合计最多：{route_budget}分钟。
+- 首稿使用景点信息中的建议visit_duration；如真实路线校验超时，系统最多允许一次受限修正。
+- 修正时每个景点最多缩短原建议的20%，且通常不能低于90分钟；后端会再次校验时间与真实路线。
+- 路线包括酒店出发、景点之间、返回酒店。优先选相距较近的2个景点；只有时间足够时才选3个。
+- 最终行程会根据真实地图路线耗时重新校验，超时会被拒绝。
+
 **要求:**
 1. 每天安排2-3个景点
 2. 每天必须且只能包含breakfast、lunch、dinner各一餐，餐厅必须从餐厅信息中选择并保留poi_id
 3. 每天推荐一个具体的酒店(从酒店信息中选择)
-3. 考虑景点之间的距离和交通方式
-4. 返回完整的JSON格式数据
-5. 景点的经纬度坐标要真实准确
+4. 考虑景点之间的距离和交通方式
+5. 返回完整的JSON格式数据
+6. 景点的经纬度坐标要真实准确
 """
         if request.free_text_input:
             query += f"\n**额外要求:** {request.free_text_input}"
@@ -960,6 +1124,7 @@ class MultiAgentTripPlanner:
         city: str,
         requested_transportation: str,
         amap_service,
+        route_cache: dict | None = None,
     ) -> List[str]:
         """写入真实路线；路线完整时用总耗时校验单日可行性。"""
         if day.hotel is None:
@@ -971,16 +1136,24 @@ class MultiAgentTripPlanner:
         stops = [day.hotel, *day.attractions, day.hotel]
         day.travel_legs = []
         warnings: List[str] = []
+        if route_cache is None:
+            route_cache = {}
 
         for origin, destination in zip(stops, stops[1:]):
             try:
-                route = amap_service.plan_route(
-                    origin_address=origin.address,
-                    destination_address=destination.address,
-                    origin_city=city,
-                    destination_city=city,
-                    route_type=route_type,
+                cache_key = (
+                    origin.address, destination.address, city, route_type
                 )
+                route = route_cache.get(cache_key)
+                if route is None:
+                    route = amap_service.plan_route(
+                        origin_address=origin.address,
+                        destination_address=destination.address,
+                        origin_city=city,
+                        destination_city=city,
+                        route_type=route_type,
+                    )
+                    route_cache[cache_key] = route
                 day.travel_legs.append(
                     TravelLeg(
                         origin_poi_id=origin.poi_id,
@@ -1021,10 +1194,28 @@ class MultiAgentTripPlanner:
             + settings.daily_meal_buffer_minutes
         )
         if required_minutes > settings.daily_available_minutes:
-            raise PlanValidationError(
-                f"第{day.day_index + 1}天行程不可行：景点、路线和用餐"
-                f"共需约{required_minutes}分钟，超过每日可用"
-                f"{settings.daily_available_minutes}分钟"
+            raise PlanFeasibilityError(
+                day_index=day.day_index,
+                visit_minutes=visit_minutes,
+                route_minutes=route_minutes,
+                meal_minutes=settings.daily_meal_buffer_minutes,
+                available_minutes=settings.daily_available_minutes,
+                attractions=[
+                    {
+                        "poi_id": attraction.poi_id,
+                        "name": attraction.name,
+                        "visit_minutes": attraction.visit_duration,
+                    }
+                    for attraction in day.attractions
+                ],
+                routes=[
+                    {
+                        "from": leg.origin_name,
+                        "to": leg.destination_name,
+                        "minutes": ceil(leg.duration / 60),
+                    }
+                    for leg in day.travel_legs
+                ],
             )
         return warnings
 
