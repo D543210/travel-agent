@@ -4,6 +4,7 @@ from dbm import error
 from typing import List, Dict, Any, Optional
 from hello_agents.tools import MCPTool
 from ..config import get_settings
+from ..logging_context import log
 from ..models.schemas import Location, POIInfo, WeatherInfo,RouteInfo
 from .mcp_response_parser import extract_json_value
 from threading import Lock
@@ -473,7 +474,7 @@ class AmapService:
                 }
             })
             
-            print(f"天气查询结果: {result[:200]}...")
+            log("天气服务调用完成")
 
             
             if "{" in result and "}" in result:
@@ -581,7 +582,7 @@ class AmapService:
                 "arguments": arguments
             })
             
-            print(f"路线规划结果: {result[:200]}...")
+            log("路线服务调用完成")
             
             # TODO: 解析实际的路线数据
             return parse_route_result(
@@ -615,7 +616,7 @@ class AmapService:
                 "arguments": arguments
             })
 
-            print(f"地理编码结果: {result[:200]}...")
+            log("地理编码服务调用完成")
 
             # TODO: 解析实际的坐标数据
             return None
@@ -677,7 +678,7 @@ class AmapService:
                 }
             })
 
-            print(f"POI详情结果: {result[:200]}...")
+            log("POI详情服务调用完成")
 
             # 解析结果并提取图片
             import json

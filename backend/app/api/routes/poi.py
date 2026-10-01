@@ -1,12 +1,27 @@
 """POI相关API路由"""
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import Annotated, List, Optional
+from ...auth.dependencies import get_current_user
+from ...config import get_settings
+from ...db.models import User
+from ...security.rate_limit import enforce_rate_limit
 from ...services.amap_service import get_amap_service
 from ...services.unsplash_service import get_unsplash_service
 
 router = APIRouter(prefix="/poi", tags=["POI"])
+settings = get_settings()
+
+
+def _limit_external(request: Request, user: User) -> None:
+    enforce_rate_limit(
+        request,
+        scope="external-poi",
+        identifier=str(user.id),
+        limit=settings.external_api_rate_limit_per_minute,
+        window_seconds=60,
+    )
 
 
 class POIDetailResponse(BaseModel):
@@ -22,7 +37,11 @@ class POIDetailResponse(BaseModel):
     summary="获取POI详情",
     description="根据POI ID获取详细信息,包括图片"
 )
-async def get_poi_detail(poi_id: str):
+def get_poi_detail(
+    poi_id: Annotated[str, Path(min_length=1, max_length=128)],
+    request: Request,
+    current_user: Annotated[User, Depends(get_current_user)],
+):
     """
     获取POI详情
     
@@ -32,6 +51,7 @@ async def get_poi_detail(poi_id: str):
     Returns:
         POI详情响应
     """
+    _limit_external(request, current_user)
     try:
         amap_service = get_amap_service()
         
@@ -44,11 +64,10 @@ async def get_poi_detail(poi_id: str):
             data=result
         )
         
-    except Exception as e:
-        print(f"❌ 获取POI详情失败: {str(e)}")
+    except Exception:
         raise HTTPException(
-            status_code=500,
-            detail=f"获取POI详情失败: {str(e)}"
+            status_code=503,
+            detail={"code": "POI_SERVICE_UNAVAILABLE", "message": "POI详情服务暂时不可用"},
         )
 
 
@@ -57,7 +76,12 @@ async def get_poi_detail(poi_id: str):
     summary="搜索POI",
     description="根据关键词搜索POI"
 )
-async def search_poi(keywords: str, city: str = "北京"):
+def search_poi(
+    request: Request,
+    current_user: Annotated[User, Depends(get_current_user)],
+    keywords: str = Query(..., min_length=1, max_length=80),
+    city: str = Query("北京", min_length=1, max_length=50),
+):
     """
     搜索POI
 
@@ -68,6 +92,7 @@ async def search_poi(keywords: str, city: str = "北京"):
     Returns:
         搜索结果
     """
+    _limit_external(request, current_user)
     try:
         amap_service = get_amap_service()
         result = amap_service.search_poi(keywords, city)
@@ -78,11 +103,10 @@ async def search_poi(keywords: str, city: str = "北京"):
             "data": result
         }
 
-    except Exception as e:
-        print(f"❌ 搜索POI失败: {str(e)}")
+    except Exception:
         raise HTTPException(
-            status_code=500,
-            detail=f"搜索POI失败: {str(e)}"
+            status_code=503,
+            detail={"code": "POI_SERVICE_UNAVAILABLE", "message": "POI搜索服务暂时不可用"},
         )
 
 
@@ -91,7 +115,11 @@ async def search_poi(keywords: str, city: str = "北京"):
     summary="获取景点图片",
     description="根据景点名称从Unsplash获取图片"
 )
-async def get_attraction_photo(name: str):
+def get_attraction_photo(
+    request: Request,
+    current_user: Annotated[User, Depends(get_current_user)],
+    name: str = Query(..., min_length=1, max_length=100),
+):
     """
     获取景点图片
 
@@ -101,6 +129,7 @@ async def get_attraction_photo(name: str):
     Returns:
         图片URL
     """
+    _limit_external(request, current_user)
     try:
         unsplash_service = get_unsplash_service()
 
@@ -120,10 +149,8 @@ async def get_attraction_photo(name: str):
             }
         }
 
-    except Exception as e:
-        print(f"❌ 获取景点图片失败: {str(e)}")
+    except Exception:
         raise HTTPException(
-            status_code=500,
-            detail=f"获取景点图片失败: {str(e)}"
+            status_code=503,
+            detail={"code": "PHOTO_SERVICE_UNAVAILABLE", "message": "图片服务暂时不可用"},
         )
-

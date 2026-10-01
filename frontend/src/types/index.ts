@@ -15,7 +15,7 @@ export interface Attraction {
   category?: string
   rating?: number
   image_url?: string
-  ticket_price?: number
+  ticket_price?: number | null
 }
 
 export interface Meal {
@@ -110,4 +110,88 @@ export interface TripPlanResponse {
   message: string
   warnings: string[]
   data?: TripPlan
+}
+
+export interface AuthUser {
+  id: string
+  email: string
+  display_name: string
+  is_active: boolean
+  created_at: string
+}
+
+export interface AuthResponse {
+  message: string
+  user: AuthUser
+}
+
+export interface TripPlanningJobRequest extends TripFormData {
+  use_saved_preferences: boolean
+}
+
+export interface JobCreatedResponse {
+  job_id: string
+  trip_id: string
+  status: 'queued'
+}
+
+export interface PlanningJob {
+  job_id: string
+  trip_id: string
+  kind: 'generate_trip' | 'revise_trip'
+  status: 'queued' | 'running' | 'succeeded' | 'failed'
+  stage: string
+  progress_current: number
+  progress_total: number
+  progress_percent: number
+  progress_message: string
+  result_version?: number
+  error_code?: string
+  error_message?: string
+  attempts: number
+}
+
+export interface TripDetail {
+  trip_id: string
+  version: number
+  status: string
+  plan: TripPlan
+}
+
+export interface TripSummary {
+  trip_id: string
+  title: string
+  status: 'planning' | 'ready' | 'failed'
+  current_version: number
+  created_at: string
+  updated_at: string
+  archived_at?: string | null
+}
+
+export interface UserPreference {
+  attraction_types: string[]
+  dietary_restrictions: string[]
+  travel_pace?: string | null
+  transportation_preference?: string | null
+  accommodation_preference?: string | null
+  version?: number
+  updated_at?: string
+}
+
+export interface PoiSearchItem {
+  id: string
+  name: string
+  type: string
+  address: string
+  location: Location
+  tel?: string | null
+}
+
+export interface TripEditOperation {
+  type: 'delete_attraction' | 'move_attraction' | 'update_visit_duration' | 'replace_attraction'
+  day_index: number
+  attraction_index: number
+  target_index?: number
+  visit_duration?: number
+  replacement_poi_id?: string
 }

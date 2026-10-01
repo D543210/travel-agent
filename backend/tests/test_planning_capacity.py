@@ -2,6 +2,7 @@ import asyncio
 import threading
 
 import httpx
+import pytest
 
 from app.api.main import app
 from app.planning_concurrency import PlanningCapacityLimiter
@@ -9,6 +10,9 @@ from tests.concurrency_helpers import (
     create_request_payload,
     create_test_plan,
 )
+
+
+pytestmark = pytest.mark.usefixtures("authenticated_user")
 
 
 class BlockingPlanner:

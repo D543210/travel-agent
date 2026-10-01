@@ -1,7 +1,10 @@
 """地图服务API路由"""
 
-from fastapi import APIRouter, HTTPException, Query
-from typing import Optional
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from typing import Annotated, Optional
+from ...auth.dependencies import get_current_user
+from ...config import get_settings
+from ...db.models import User
 from ...models.schemas import (
     POISearchRequest,
     POISearchResponse,
@@ -10,8 +13,20 @@ from ...models.schemas import (
     WeatherResponse
 )
 from ...services.amap_service import get_amap_service
+from ...security.rate_limit import enforce_rate_limit
 
 router = APIRouter(prefix="/map", tags=["地图服务"])
+settings = get_settings()
+
+
+def _limit_external(request: Request, user: User) -> None:
+    enforce_rate_limit(
+        request,
+        scope="external-map",
+        identifier=str(user.id),
+        limit=settings.external_api_rate_limit_per_minute,
+        window_seconds=60,
+    )
 
 
 @router.get(
@@ -20,9 +35,11 @@ router = APIRouter(prefix="/map", tags=["地图服务"])
     summary="搜索POI",
     description="根据关键词搜索POI(兴趣点)"
 )
-async def search_poi(
-    keywords: str = Query(..., description="搜索关键词", example="故宫"),
-    city: str = Query(..., description="城市", example="北京"),
+def search_poi(
+    request: Request,
+    current_user: Annotated[User, Depends(get_current_user)],
+    keywords: str = Query(..., min_length=1, max_length=80, description="搜索关键词", examples=["故宫"]),
+    city: str = Query(..., min_length=1, max_length=50, description="城市", examples=["北京"]),
     citylimit: bool = Query(True, description="是否限制在城市范围内")
 ):
     """
@@ -36,6 +53,7 @@ async def search_poi(
     Returns:
         POI搜索结果
     """
+    _limit_external(request, current_user)
     try:
         # 获取服务实例
         service = get_amap_service()
@@ -49,11 +67,10 @@ async def search_poi(
             data=pois
         )
         
-    except Exception as e:
-        print(f"❌ POI搜索失败: {str(e)}")
+    except Exception:
         raise HTTPException(
-            status_code=500,
-            detail=f"POI搜索失败: {str(e)}"
+            status_code=503,
+            detail={"code": "POI_SERVICE_UNAVAILABLE", "message": "POI服务暂时不可用"},
         )
 
 
@@ -63,8 +80,10 @@ async def search_poi(
     summary="查询天气",
     description="查询指定城市的天气信息"
 )
-async def get_weather(
-    city: str = Query(..., description="城市名称", example="北京")
+def get_weather(
+    request: Request,
+    current_user: Annotated[User, Depends(get_current_user)],
+    city: str = Query(..., min_length=1, max_length=50, description="城市名称", examples=["北京"])
 ):
     """
     查询天气
@@ -75,6 +94,7 @@ async def get_weather(
     Returns:
         天气信息
     """
+    _limit_external(request, current_user)
     try:
         # 获取服务实例
         service = get_amap_service()
@@ -88,11 +108,10 @@ async def get_weather(
             data=weather_info
         )
         
-    except Exception as e:
-        print(f"❌ 天气查询失败: {str(e)}")
+    except Exception:
         raise HTTPException(
-            status_code=500,
-            detail=f"天气查询失败: {str(e)}"
+            status_code=503,
+            detail={"code": "WEATHER_SERVICE_UNAVAILABLE", "message": "天气服务暂时不可用"},
         )
 
 
@@ -102,7 +121,11 @@ async def get_weather(
     summary="规划路线",
     description="规划两点之间的路线"
 )
-async def plan_route(request: RouteRequest):
+def plan_route(
+    route_request: RouteRequest,
+    request: Request,
+    current_user: Annotated[User, Depends(get_current_user)],
+):
     """
     规划路线
     
@@ -112,17 +135,18 @@ async def plan_route(request: RouteRequest):
     Returns:
         路线信息
     """
+    _limit_external(request, current_user)
     try:
         # 获取服务实例
         service = get_amap_service()
         
         # 规划路线
         route_info = service.plan_route(
-            origin_address=request.origin_address,
-            destination_address=request.destination_address,
-            origin_city=request.origin_city,
-            destination_city=request.destination_city,
-            route_type=request.route_type
+            origin_address=route_request.origin_address,
+            destination_address=route_request.destination_address,
+            origin_city=route_request.origin_city,
+            destination_city=route_request.destination_city,
+            route_type=route_request.route_type
         )
         
         return RouteResponse(
@@ -131,11 +155,10 @@ async def plan_route(request: RouteRequest):
             data=route_info
         )
         
-    except Exception as e:
-        print(f"❌ 路线规划失败: {str(e)}")
+    except Exception:
         raise HTTPException(
-            status_code=500,
-            detail=f"路线规划失败: {str(e)}"
+            status_code=503,
+            detail={"code": "ROUTE_SERVICE_UNAVAILABLE", "message": "路线服务暂时不可用"},
         )
 
 
@@ -144,7 +167,7 @@ async def plan_route(request: RouteRequest):
     summary="健康检查",
     description="检查地图服务是否正常"
 )
-async def health_check():
+def health_check():
     """健康检查"""
     try:
         # 检查服务是否可用
@@ -155,9 +178,8 @@ async def health_check():
             "service": "map-service",
             "mcp_tools_count": len(service.mcp_tool._available_tools)
         }
-    except Exception as e:
+    except Exception:
         raise HTTPException(
             status_code=503,
-            detail=f"服务不可用: {str(e)}"
+            detail={"code": "MAP_SERVICE_UNAVAILABLE", "message": "地图服务不可用"},
         )
-

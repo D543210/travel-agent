@@ -10,12 +10,17 @@
 - ⏱️ **行程可行性校验**: 用真实路线核算每日耗时；超时后允许一次受限修正，再次校验地点与时间
 - 🎨 **现代化前端**: Vue3 + TypeScript + Vite,响应式设计,流畅的用户体验
 - 📱 **完整功能**: 包含住宿、交通、餐饮和景点游览时间推荐
+- 🔐 **用户与长期偏好**: 注册登录、HttpOnly会话、显式保存/应用/删除旅行偏好
+- ⏳ **后台任务与真实进度**: Celery + Redis执行生成和重规划，刷新页面可恢复进度
+- 🧾 **行程版本**: 删除、替换、调序和停留时间修改均生成新版本，失败不覆盖旧版本
 
 ## 🏗️ 技术栈
 
 ### 后端
 - **框架**: HelloAgents (基于SimpleAgent)
 - **API**: FastAPI
+- **数据库**: PostgreSQL + SQLAlchemy 2 + Alembic
+- **后台任务**: Celery + Redis
 - **MCP工具**: amap-mcp-server (高德地图)
 - **LLM**: 支持多种LLM提供商(OpenAI, DeepSeek等)
 
@@ -66,9 +71,11 @@ helloagents-trip-planner/
 ### 前提条件
 
 - Python 3.10+
-- Node.js 16+
+- Node.js 20.19+ 或 22.12+
 - 高德地图API密钥 (Web服务API和Web端(JS API))
 - LLM API密钥 (OpenAI/DeepSeek等)
+- PostgreSQL 14+
+- Redis 6+
 
 ### 后端安装
 
@@ -105,10 +112,31 @@ cp .env.example .env
 # 编辑.env文件,填入你的API密钥
 ```
 
-5. 启动后端服务
+5. 创建/更新数据库表
+```bash
+python -m alembic upgrade head
+```
+
+`alembic upgrade head` 是把当前数据库结构升级到代码声明的最新版本，不会把数据搬到另一台数据库。现有的旧 `trip_jobs` 表由迁移配置保留。
+
+6. 启动后端服务
 ```bash
 uvicorn app.api.main:app --reload --host 0.0.0.0 --port 8000
 ```
+
+7. 在另一个已激活虚拟环境的 PowerShell 窗口启动 Worker
+```powershell
+celery -A app.tasks.celery_app.celery_app worker --loglevel=info --pool=solo
+```
+
+Windows 开发环境使用 `--pool=solo`；API 与 Worker 必须使用同一套 `DATABASE_URL` 和 `CELERY_BROKER_URL`。
+
+8. 再启动 Celery Beat，用于恢复超时任务和清理过期会话/历史任务
+```powershell
+celery -A app.tasks.celery_app.celery_app beat --loglevel=info
+```
+
+生产环境请将 `APP_ENVIRONMENT=production`、`SESSION_COOKIE_SECURE=true`，并把 `CORS_ORIGINS` 限制为实际 HTTPS 前端域名。API、Worker 和 Beat 应由进程管理器持续运行。
 
 ### 前端安装
 
@@ -134,6 +162,8 @@ npm run dev
 ```
 
 5. 打开浏览器访问 `http://localhost:5173`
+
+登录后可在 `/trips` 查看、打开、归档和恢复自己的行程；任务执行期间刷新页面也会恢复真实进度。
 
 ## 📝 使用指南
 
@@ -178,18 +208,29 @@ npm run dev
 
 每天至少安排2个景点,路线按“酒店 → 景点 → 酒店”查询。路线齐全时,后端计算“景点停留 + 真实路线 + 三餐预留”,与 `DAILY_AVAILABLE_MINUTES` 比较。首次超时会把各项耗时反馈给规划Agent,最多修正一次；首稿使用景点筛选Agent建议的停留时间,修正时每个景点最多缩短原建议的20%,通常不得低于90分钟。修正后的POI、停留时间、路线和预算仍由后端校验；不合格则返回错误,不会自动提高每日上限。若路线数据不完整,响应会标记降级,并提示无法完整校验时间可行性。
 
-当前`POST /api/trip/plan`仍同步生成行程。数据库中的任务表和Redis环境尚未接入这条请求流程,也尚未实现跨任务的用户记忆。
+推荐使用 `POST /api/trips/plan` 创建后台规划任务，并轮询 `GET /api/jobs/{job_id}`。任务成功后通过 `GET /api/trips/{trip_id}` 读取当前版本。旧的 `POST /api/trip/plan` 保留用于兼容，但仍是同步接口。
+
+长期偏好只在用户明确保存后写入 `user_preferences`，且只有请求中的 `use_saved_preferences=true` 才会应用。行程修改通过 `POST /api/trips/{trip_id}/revisions` 提交，后端会重算受影响的路线、时间和预算，通过校验后才发布新版本。
 
 ### 后端测试
 
-在 `backend` 目录激活虚拟环境后运行 `python -m pytest -q`。测试覆盖受控工具调用、错误输出、真实POI约束和超时修正；真实模型和地图请求仍需单独验证。
+在 `backend` 目录激活虚拟环境后运行 `python -m pytest -q`。前端在 `frontend` 目录运行 `npm test` 和 `npm run build`。测试覆盖认证、权限隔离、任务可靠性、行程持久化、受控工具调用、错误输出、真实POI约束和超时修正；真实模型和地图请求仍需单独验证。
 
 ## 📄 API文档
 
 启动后端服务后,访问 `http://localhost:8000/docs` 查看完整的API文档。
 
 主要端点:
-- `POST /api/trip/plan` - 生成旅行计划
+- `POST /api/auth/register`、`POST /api/auth/login`、`POST /api/auth/logout` - 用户会话
+- `GET/PUT/DELETE /api/preferences/me` - 管理当前用户的长期偏好
+- `POST /api/trips/plan` - 创建异步旅行规划任务
+- `GET /api/jobs/{job_id}` - 获取真实任务阶段与进度
+- `GET /api/jobs` - 获取当前用户的活动任务或任务历史
+- `GET /api/trips` - 获取当前用户的行程列表
+- `GET /api/trips/{trip_id}` - 读取当前行程版本
+- `DELETE /api/trips/{trip_id}`、`POST /api/trips/{trip_id}/restore` - 归档或恢复行程
+- `POST /api/trips/{trip_id}/revisions` - 创建行程修订任务
+- `POST /api/trip/plan` - 兼容用的同步生成接口
 - `GET /api/map/poi` - 搜索POI
 - `GET /api/map/weather` - 查询天气
 - `POST /api/map/route` - 规划路线

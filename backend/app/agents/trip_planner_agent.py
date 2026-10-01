@@ -3,7 +3,7 @@
 import json
 from datetime import date, timedelta
 from math import ceil
-from typing import Dict, Any, List
+from typing import Dict, Any, Callable, List
 from hello_agents import SimpleAgent
 from ..services.llm_service import get_llm
 from ..models.schemas import (
@@ -36,6 +36,8 @@ from ..logging_context import log
 # 修正时最多缩短原建议时长的20%；低于90分钟的建议不再缩短。
 MAX_VISIT_REDUCTION_RATIO = 0.20
 MIN_REPAIRED_VISIT_MINUTES = 90
+
+ProgressCallback = Callable[[str, int, int, str], None]
 
 # ============ Agent提示词 ============
 
@@ -255,7 +257,11 @@ class MultiAgentTripPlanner:
             traceback.print_exc()
             raise
     
-    def plan_trip(self, request: TripRequest) -> TripPlan:
+    def plan_trip(
+        self,
+        request: TripRequest,
+        progress_callback: ProgressCallback | None = None,
+    ) -> TripPlan:
         """
         使用多智能体协作生成旅行计划
 
@@ -267,19 +273,20 @@ class MultiAgentTripPlanner:
         """
         try:
             warnings: List[str] = []
-            print(f"\n{'='*60}")
-            print(f"🚀 开始多智能体协作规划旅行...")
-            print(f"目的地: {request.city}")
-            print(f"日期: {request.start_date} 至 {request.end_date}")
-            print(f"天数: {request.travel_days}天")
-            print(f"偏好: {', '.join(request.preferences) if request.preferences else '无'}")
-            print(f"{'='*60}\n")
+            log("开始多智能体协作规划旅行")
 
 
             # 获取高德服务，后续景点和天气共用
             amap_service = get_amap_service()
 
             # 步骤1: 通过Service获取真实景点，再由Agent进行筛选
+            self._emit_progress(
+                progress_callback,
+                "searching_attractions",
+                1,
+                10,
+                "正在查询真实景点",
+            )
             log("📍 步骤1: 获取并筛选景点")
             attraction_keyword = (
                 request.preferences[0]
@@ -303,6 +310,9 @@ class MultiAgentTripPlanner:
             )
 
             # 步骤2: 通过天气service查询天气信息
+            self._emit_progress(
+                progress_callback, "fetching_weather", 2, 10, "正在查询天气"
+            )
             log("🌤️ 步骤2: 查询天气")
 
             # 使用高德服务直接查询天气
@@ -321,9 +331,16 @@ class MultiAgentTripPlanner:
                 ensure_ascii=False,
                 indent=2
             )
-            print(f"天气查询结果: {weather_response[:200]}...\n")
+            log("天气数据准备完成")
 
 
+            self._emit_progress(
+                progress_callback,
+                "tool_decision",
+                3,
+                10,
+                "正在分析是否需要补充数据",
+            )
             decision_result = run_tool_decisions(
                 request=request,
                 initial_candidates=attraction_candidates,
@@ -356,6 +373,13 @@ class MultiAgentTripPlanner:
                 route_hints=route_hints,
             )
 
+            self._emit_progress(
+                progress_callback,
+                "selecting_attractions",
+                4,
+                10,
+                "正在筛选景点",
+            )
             try:
                 attraction_response = self.attraction_agent.run(
                     attraction_query
@@ -366,7 +390,7 @@ class MultiAgentTripPlanner:
                     "景点筛选模型暂时不可用"
                 ) from error
 
-            print(f"景点筛选结果: {attraction_response[:200]}...\n")
+            log("景点筛选完成")
 
             attraction_selection_data = extract_json_value(
                 attraction_response
@@ -459,6 +483,13 @@ class MultiAgentTripPlanner:
 
 
             # 步骤3: 酒店推荐Agent搜索酒店
+            self._emit_progress(
+                progress_callback,
+                "selecting_hotel",
+                5,
+                10,
+                "正在查询并筛选酒店",
+            )
             log("🏨 步骤3: 搜索酒店")
             hotel_query = f"请搜索{request.city}的{request.accommodation}"
             hotel_keyword = request.accommodation.strip()
@@ -499,7 +530,7 @@ class MultiAgentTripPlanner:
                     "酒店筛选模型暂时不可用"
                 ) from error
 
-            print(f"酒店筛选结果: {hotel_response[:200]}...\n")
+            log("酒店筛选完成")
             try:
                 hotel_selection_data = extract_json_value(
                     hotel_response
@@ -577,6 +608,13 @@ class MultiAgentTripPlanner:
             )
 
             # 步骤4: 获取真实餐厅并由Agent筛选，形成餐厅POI可信闭环
+            self._emit_progress(
+                progress_callback,
+                "selecting_restaurants",
+                6,
+                10,
+                "正在查询并筛选餐厅",
+            )
             log("🍽️ 步骤4: 获取并筛选餐厅")
             try:
                 restaurant_candidates = amap_service.search_poi(
@@ -661,6 +699,13 @@ class MultiAgentTripPlanner:
             )
 
             # 步骤5: 行程规划Agent整合信息生成计划
+            self._emit_progress(
+                progress_callback,
+                "generating_plan",
+                7,
+                10,
+                "模型正在生成行程",
+            )
             log("📋 步骤5: 生成行程计划")
             planner_query = self._build_planner_query(
                 request,
@@ -677,7 +722,7 @@ class MultiAgentTripPlanner:
                 raise ExternalServiceError(
                     "行程规划模型暂时不可用"
                 ) from error
-            print(f"行程规划结果: {planner_response[:300]}...\n")
+            log("行程模型输出完成")
 
             # 只在真实路线导致超时的情况下给规划 Agent 一次修正机会。
             # 两次校验共用路线缓存，避免重复请求相同的地图路线。
@@ -699,11 +744,19 @@ class MultiAgentTripPlanner:
                         amap_service=amap_service,
                         route_cache=route_cache,
                         allow_duration_adjustment=(attempt == 1),
+                        progress_callback=progress_callback,
                     )
                 except PlanFeasibilityError as error:
                     if attempt == 1:
                         raise
                     log(f"行程超时，要求规划 Agent 修正一次: {error}")
+                    self._emit_progress(
+                        progress_callback,
+                        "repairing_plan",
+                        8,
+                        10,
+                        "真实路线校验超时，正在修正行程",
+                    )
                     repair_feedback = {
                         "day_index": error.day_index,
                         "visit_minutes": error.visit_minutes,
@@ -761,6 +814,13 @@ class MultiAgentTripPlanner:
             ]
 
             trip_plan.weather_info = trusted_weather_info
+            self._emit_progress(
+                progress_callback,
+                "normalizing_budget",
+                9,
+                10,
+                "正在重算预算",
+            )
             self._normalize_and_validate_budget(trip_plan)
             trip_plan.warnings = warnings
             trip_plan.status = "degraded" if warnings else "success"
@@ -773,7 +833,7 @@ class MultiAgentTripPlanner:
             return trip_plan
 
         except Exception as e:
-            print(f"❌ 生成旅行计划失败: {str(e)}")
+            log(f"旅行计划生成失败: {type(e).__name__}")
             raise
     
     def _validate_and_hydrate_generated_plan(
@@ -792,6 +852,7 @@ class MultiAgentTripPlanner:
         amap_service,
         route_cache: dict,
         allow_duration_adjustment: bool = False,
+        progress_callback: ProgressCallback | None = None,
     ) -> List[str]:
         """每次都从头校验并回填可信 POI；修正计划也走同一套校验。"""
         warnings: List[str] = []
@@ -899,6 +960,7 @@ class MultiAgentTripPlanner:
                 requested_transportation=request.transportation,
                 amap_service=amap_service,
                 route_cache=route_cache,
+                progress_callback=progress_callback,
             )
             warnings.extend(route_warnings)
         return warnings
@@ -1125,6 +1187,7 @@ class MultiAgentTripPlanner:
         requested_transportation: str,
         amap_service,
         route_cache: dict | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> List[str]:
         """写入真实路线；路线完整时用总耗时校验单日可行性。"""
         if day.hotel is None:
@@ -1139,7 +1202,11 @@ class MultiAgentTripPlanner:
         if route_cache is None:
             route_cache = {}
 
-        for origin, destination in zip(stops, stops[1:]):
+        expected_leg_count = len(stops) - 1
+        for leg_index, (origin, destination) in enumerate(
+            zip(stops, stops[1:]),
+            start=1,
+        ):
             try:
                 cache_key = (
                     origin.address, destination.address, city, route_type
@@ -1166,13 +1233,20 @@ class MultiAgentTripPlanner:
                         description=route.description,
                     )
                 )
+                self._emit_progress(
+                    progress_callback,
+                    "validating_routes",
+                    8,
+                    10,
+                    f"第{day.day_index + 1}天路线已完成"
+                    f"{leg_index}/{expected_leg_count}段",
+                )
             except Exception as error:
                 log(
                     f"⚠️ 第{day.day_index + 1}天路线查询失败: "
                     f"{origin.name} -> {destination.name}: {error}"
                 )
 
-        expected_leg_count = len(stops) - 1
         if len(day.travel_legs) != expected_leg_count:
             warnings.append(
                 f"第{day.day_index + 1}天仅获取到"
@@ -1220,13 +1294,24 @@ class MultiAgentTripPlanner:
         return warnings
 
     @staticmethod
+    def _emit_progress(
+        callback: ProgressCallback | None,
+        stage: str,
+        current: int,
+        total: int,
+        message: str,
+    ) -> None:
+        if callback is not None:
+            callback(stage, current, total, message)
+
+    @staticmethod
     def _normalize_and_validate_budget(trip_plan: TripPlan) -> None:
         """以行程明细为唯一来源重算预算，避免模型汇总算术错误。"""
         if trip_plan.budget is None:
             raise PlanValidationError("行程缺少预算信息")
 
         attractions = sum(
-            attraction.ticket_price
+            attraction.ticket_price or 0
             for day in trip_plan.days
             for attraction in day.attractions
         )

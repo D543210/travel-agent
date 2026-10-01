@@ -1,12 +1,18 @@
 """旅行规划API路由"""
 
-from fastapi import APIRouter, HTTPException
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from ...auth.dependencies import get_current_user
+from ...db.models import User
+from ...config import get_settings
 from ...models.schemas import (
     TripRequest,
     TripPlanResponse,
     ErrorResponse
 )
 from ...agents.trip_planner_agent import create_trip_planner
+from ...security.rate_limit import enforce_rate_limit
 
 from ...exceptions import (
     AgentOutputError,
@@ -19,6 +25,7 @@ from ...logging_context import log
 from ...planning_concurrency import get_planning_capacity_limiter
 
 router = APIRouter(prefix="/trip", tags=["旅行规划"])
+settings = get_settings()
 
 
 @router.post(
@@ -27,7 +34,14 @@ router = APIRouter(prefix="/trip", tags=["旅行规划"])
     summary="生成旅行计划",
     description="根据用户输入的旅行需求,生成详细的旅行计划"
 )
-def plan_trip(request: TripRequest):
+def plan_trip(
+    request: TripRequest,
+    http_request: Request,
+    current_user: Annotated[
+        User,
+        Depends(get_current_user),
+    ],
+):
     """
     生成旅行计划
 
@@ -50,9 +64,17 @@ def plan_trip(request: TripRequest):
             headers={"Retry-After": "5"},
         )
 
+    enforce_rate_limit(
+        http_request,
+        scope="legacy-trip-plan",
+        identifier=str(current_user.id),
+        limit=settings.trip_plan_rate_limit_per_hour,
+        window_seconds=3600,
+    )
     try:
         log("=" * 60)
         log("📥 收到旅行规划请求")
+        log(f"用户ID: {current_user.id}")
         log(f"城市: {request.city}")
         log(
             f"日期: {request.start_date} - "

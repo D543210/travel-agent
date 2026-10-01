@@ -1,8 +1,9 @@
 """数据模型定义"""
 
-from typing import List, Literal, Optional, Union
+from typing import Annotated, List, Literal, Optional, Union
 from pydantic import (
     BaseModel,
+    ConfigDict,
     Field,
     field_validator,
     model_validator,
@@ -14,14 +15,37 @@ from datetime import date
 
 class TripRequest(BaseModel):
     """旅行规划请求"""
-    city: str = Field(..., description="目的地城市", example="北京")
-    start_date: str = Field(..., description="开始日期 YYYY-MM-DD", example="2025-06-01")
-    end_date: str = Field(..., description="结束日期 YYYY-MM-DD", example="2025-06-03")
-    travel_days: int = Field(..., description="旅行天数", ge=1, le=5, example=3)
-    transportation: str = Field(..., description="交通方式", example="公共交通")
-    accommodation: str = Field(..., description="住宿偏好", example="经济型酒店")
-    preferences: List[str] = Field(default=[], description="旅行偏好标签", example=["历史文化", "美食"])
-    free_text_input: Optional[str] = Field(default="", description="额外要求", example="希望多安排一些博物馆")
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "city": "北京",
+                "start_date": "2025-06-01",
+                "end_date": "2025-06-03",
+                "travel_days": 3,
+                "transportation": "公共交通",
+                "accommodation": "经济型酒店",
+                "preferences": ["历史文化", "美食"],
+                "free_text_input": "希望多安排一些博物馆",
+            }
+        }
+    )
+
+    city: str = Field(..., min_length=1, max_length=50, description="目的地城市")
+    start_date: str = Field(..., description="开始日期 YYYY-MM-DD")
+    end_date: str = Field(..., description="结束日期 YYYY-MM-DD")
+    travel_days: int = Field(..., description="旅行天数", ge=1, le=5)
+    transportation: Literal["公共交通", "自驾", "步行", "混合"] = Field(..., description="交通方式")
+    accommodation: Literal["经济型酒店", "舒适型酒店", "豪华酒店", "民宿"] = Field(..., description="住宿偏好")
+    preferences: List[Annotated[str, Field(min_length=1, max_length=30)]] = Field(
+        default_factory=list,
+        max_length=20,
+        description="旅行偏好标签",
+    )
+    free_text_input: Optional[str] = Field(
+        default="",
+        max_length=1000,
+        description="额外要求",
+    )
     
     @model_validator(mode="after")
     def validate_trip_dates(self):
@@ -48,35 +72,25 @@ class TripRequest(BaseModel):
 
         return self
 
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "city": "北京",
-                "start_date": "2025-06-01",
-                "end_date": "2025-06-03",
-                "travel_days": 3,
-                "transportation": "公共交通",
-                "accommodation": "经济型酒店",
-                "preferences": ["历史文化", "美食"],
-                "free_text_input": "希望多安排一些博物馆"
-            }
-        }
-
+    @field_validator("city", "free_text_input")
+    @classmethod
+    def strip_text_fields(cls, value):
+        return value.strip() if isinstance(value, str) else value
 
 class POISearchRequest(BaseModel):
     """POI搜索请求"""
-    keywords: str = Field(..., description="搜索关键词", example="故宫")
-    city: str = Field(..., description="城市", example="北京")
+    keywords: str = Field(..., min_length=1, max_length=100, description="搜索关键词")
+    city: str = Field(..., min_length=1, max_length=50, description="城市")
     citylimit: bool = Field(default=True, description="是否限制在城市范围内")
 
 
 class RouteRequest(BaseModel):
     """路线规划请求"""
-    origin_address: str = Field(..., description="起点地址", example="北京市朝阳区阜通东大街6号")
-    destination_address: str = Field(..., description="终点地址", example="北京市海淀区上地十街10号")
-    origin_city: Optional[str] = Field(default=None, description="起点城市")
-    destination_city: Optional[str] = Field(default=None, description="终点城市")
-    route_type: str = Field(default="walking", description="路线类型: walking/driving/transit")
+    origin_address: str = Field(..., min_length=1, max_length=200, description="起点地址")
+    destination_address: str = Field(..., min_length=1, max_length=200, description="终点地址")
+    origin_city: Optional[str] = Field(default=None, max_length=50, description="起点城市")
+    destination_city: Optional[str] = Field(default=None, max_length=50, description="终点城市")
+    route_type: Literal["walking", "driving", "transit"] = Field(default="walking", description="路线类型")
 
 
 # ============ 响应模型 ============
@@ -99,7 +113,7 @@ class Attraction(BaseModel):
     photos: Optional[List[str]] = Field(default_factory=list, description="景点图片URL列表")
     poi_id: Optional[str] = Field(default="", description="POI ID")
     image_url: Optional[str] = Field(default=None, description="图片URL")
-    ticket_price: int = Field(default=0, description="门票价格(元)")
+    ticket_price: int | None = Field(default=None, ge=0, description="门票价格(元)，未知时为空")
 
 
 class Meal(BaseModel):

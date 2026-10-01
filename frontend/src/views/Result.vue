@@ -183,6 +183,12 @@
                           </a-button>
                           <a-button
                             size="small"
+                            @click="openReplacement(day.day_index, index)"
+                          >
+                            替换
+                          </a-button>
+                          <a-button
+                            size="small"
                             danger
                             @click="deleteAttraction(day.day_index, index)"
                           >
@@ -205,18 +211,19 @@
                         <div v-if="item.ticket_price" class="price-tag">
                           ¥{{ item.ticket_price }}
                         </div>
+                        <div v-else-if="item.ticket_price == null" class="price-tag price-unknown">
+                          票价待确认
+                        </div>
                       </div>
 
                       <!-- 编辑模式下可编辑的字段 -->
                       <div v-if="editMode">
-                        <p><strong>地址:</strong></p>
-                        <a-input v-model:value="item.address" size="small" style="margin-bottom: 8px" />
+                        <p><strong>地址:</strong> {{ item.address }}</p>
 
                         <p><strong>游览时长(分钟):</strong></p>
-                        <a-input-number v-model:value="item.visit_duration" :min="10" :max="480" size="small" style="width: 100%; margin-bottom: 8px" />
+                        <a-input-number v-model:value="item.visit_duration" :min="30" :max="480" size="small" style="width: 100%; margin-bottom: 8px" />
 
-                        <p><strong>描述:</strong></p>
-                        <a-textarea v-model:value="item.description" :rows="2" size="small" style="margin-bottom: 8px" />
+                        <p><strong>描述:</strong> {{ item.description }}</p>
                       </div>
 
                       <!-- 查看模式 -->
@@ -324,43 +331,136 @@
         ↑
       </div>
     </a-back-top>
+
+    <a-modal
+      v-model:open="replacementModalOpen"
+      title="替换景点"
+      ok-text="替换并返回编辑"
+      cancel-text="取消"
+      :ok-button-props="{ disabled: !selectedReplacementPoiId }"
+      @ok="confirmReplacement"
+    >
+      <a-input-search
+        v-model:value="replacementKeyword"
+        placeholder="输入景点名称，例如：博物馆"
+        enter-button="搜索"
+        :loading="replacementSearching"
+        @search="searchReplacementCandidates"
+      />
+      <a-radio-group
+        v-if="replacementCandidates.length"
+        v-model:value="selectedReplacementPoiId"
+        class="replacement-list"
+      >
+        <a-radio
+          v-for="candidate in replacementCandidates"
+          :key="candidate.id"
+          :value="candidate.id"
+          class="replacement-option"
+        >
+          <strong>{{ candidate.name }}</strong>
+          <span>{{ candidate.address }} · {{ candidate.type }}</span>
+        </a-radio>
+      </a-radio-group>
+      <a-empty
+        v-else-if="replacementSearched && !replacementSearching"
+        description="没有找到可替换的景点"
+      />
+    </a-modal>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, onMounted, nextTick } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import { DownOutlined } from '@ant-design/icons-vue'
 import AMapLoader from '@amap/amap-jsapi-loader'
 import html2canvas from 'html2canvas'
 import jsPDF from 'jspdf'
-import type { TripPlan } from '@/types'
-import { getAttractionPhoto } from '@/services/api'
+import type { PoiSearchItem, TripPlan } from '@/types'
+import { buildEditOperations, type EditableAttraction } from '@/utils/tripEdits'
+import {
+  createTripRevision,
+  getAttractionPhoto,
+  getPlanningJob,
+  getTrip,
+  searchPois
+} from '@/services/api'
 
 const router = useRouter()
+const route = useRoute()
 const tripPlan = ref<TripPlan | null>(null)
+const tripId = ref<string | null>(null)
+const tripVersion = ref(0)
 const editMode = ref(false)
 const originalPlan = ref<TripPlan | null>(null)
 const attractionPhotos = ref<Record<string, string>>({})
 const activeSection = ref('overview')
 const activeDays = ref<number[]>([0]) // 默认展开第一天
+const replacementModalOpen = ref(false)
+const replacementKeyword = ref('')
+const replacementCandidates = ref<PoiSearchItem[]>([])
+const selectedReplacementPoiId = ref('')
+const replacementSearching = ref(false)
+const replacementSearched = ref(false)
+const replacementTarget = ref<{ dayIndex: number; attractionIndex: number } | null>(null)
 let map: any = null
 
 onMounted(async () => {
-  const data = sessionStorage.getItem('tripPlan')
-  if (data) {
-    tripPlan.value = JSON.parse(data)
-    // 加载景点图片
-    await loadAttractionPhotos()
-    // 等待DOM渲染完成后初始化地图
-    await nextTick()
-    initMap()
+  tripId.value = typeof route.params.tripId === 'string'
+    ? route.params.tripId
+    : sessionStorage.getItem('activeTripId')
+  if (tripId.value) {
+    await refreshTrip()
+    const revisionJobId = sessionStorage.getItem('activeRevisionJobId')
+    const revisionTripId = sessionStorage.getItem('activeRevisionTripId')
+    if (revisionJobId && revisionTripId === tripId.value) {
+      message.info('正在恢复行程修改进度')
+      try {
+        await waitForRevision(revisionJobId, 'restoring-trip-revision')
+      } catch (error: any) {
+        message.error(error.message || '恢复行程修改失败')
+      }
+    }
   }
 })
 
 const goBack = () => {
-  router.push('/')
+  router.push('/trips')
+}
+
+const refreshTrip = async () => {
+  if (!tripId.value) return
+  const detail = await getTrip(tripId.value)
+  tripVersion.value = detail.version
+  tripPlan.value = detail.plan
+  await loadAttractionPhotos()
+  await nextTick()
+  if (map) map.destroy()
+  initMap()
+}
+
+const waitForRevision = async (jobId: string, messageKey: string) => {
+  const deadline = Date.now() + 45 * 60 * 1000
+  while (Date.now() < deadline) {
+    const job = await getPlanningJob(jobId)
+    message.loading({ content: job.progress_message, key: messageKey, duration: 0 })
+    if (job.status === 'failed') {
+      sessionStorage.removeItem('activeRevisionJobId')
+      sessionStorage.removeItem('activeRevisionTripId')
+      throw new Error(job.error_message || '行程修改失败')
+    }
+    if (job.status === 'succeeded') {
+      sessionStorage.removeItem('activeRevisionJobId')
+      sessionStorage.removeItem('activeRevisionTripId')
+      await refreshTrip()
+      message.success({ content: '新版本已发布', key: messageKey })
+      return
+    }
+    await new Promise(resolve => setTimeout(resolve, 1500))
+  }
+  throw new Error('任务等待时间过长，请稍后重新打开该行程')
 }
 
 // 滚动到指定区域
@@ -380,22 +480,32 @@ const toggleEditMode = () => {
   message.info('进入编辑模式')
 }
 
-// 保存修改
-const saveChanges = () => {
-  editMode.value = false
-  // 更新sessionStorage
-  if (tripPlan.value) {
-    sessionStorage.setItem('tripPlan', JSON.stringify(tripPlan.value))
-  }
-  message.success('修改已保存')
+const saveChanges = async () => {
+  if (!tripPlan.value || !originalPlan.value || !tripId.value) return
 
-  // 重新初始化地图以反映更改
-  if (map) {
-    map.destroy()
+  const operations = buildEditOperations(originalPlan.value, tripPlan.value)
+  if (!operations.length) {
+    editMode.value = false
+    message.info('没有需要保存的修改')
+    return
   }
-  nextTick(() => {
-    initMap()
-  })
+
+  const messageKey = 'saving-trip-revision'
+  message.loading({ content: '正在重算路线和预算...', key: messageKey, duration: 0 })
+  try {
+    const created = await createTripRevision(tripId.value, tripVersion.value, operations)
+    sessionStorage.setItem('activeRevisionJobId', created.job_id)
+    sessionStorage.setItem('activeRevisionTripId', tripId.value)
+    await waitForRevision(created.job_id, messageKey)
+    originalPlan.value = null
+    editMode.value = false
+  } catch (error: any) {
+    tripPlan.value = JSON.parse(JSON.stringify(originalPlan.value))
+    message.error({
+      content: error.response?.data?.detail?.message || error.message || '保存失败',
+      key: messageKey
+    })
+  }
 }
 
 // 取消编辑
@@ -412,8 +522,8 @@ const deleteAttraction = (dayIndex: number, attrIndex: number) => {
   if (!tripPlan.value) return
 
   const day = tripPlan.value.days[dayIndex]
-  if (day.attractions.length <= 1) {
-    message.warning('每天至少需要保留一个景点')
+  if (day.attractions.length <= 2) {
+    message.warning('每天至少需要保留两个景点')
     return
   }
 
@@ -433,6 +543,72 @@ const moveAttraction = (dayIndex: number, attrIndex: number, direction: 'up' | '
   } else if (direction === 'down' && attrIndex < attractions.length - 1) {
     [attractions[attrIndex], attractions[attrIndex + 1]] = [attractions[attrIndex + 1], attractions[attrIndex]]
   }
+}
+
+const openReplacement = (dayIndex: number, attractionIndex: number) => {
+  replacementTarget.value = { dayIndex, attractionIndex }
+  replacementKeyword.value = ''
+  replacementCandidates.value = []
+  selectedReplacementPoiId.value = ''
+  replacementSearched.value = false
+  replacementModalOpen.value = true
+}
+
+const searchReplacementCandidates = async () => {
+  if (!tripPlan.value || !replacementKeyword.value.trim()) {
+    message.warning('请输入景点名称')
+    return
+  }
+  replacementSearching.value = true
+  replacementSearched.value = true
+  selectedReplacementPoiId.value = ''
+  try {
+    replacementCandidates.value = await searchPois(
+      replacementKeyword.value.trim(),
+      tripPlan.value.city
+    )
+  } catch (error: any) {
+    replacementCandidates.value = []
+    message.error(error.response?.data?.detail || '搜索景点失败')
+  } finally {
+    replacementSearching.value = false
+  }
+}
+
+const confirmReplacement = () => {
+  if (!tripPlan.value || !replacementTarget.value) return
+  const candidate = replacementCandidates.value.find(
+    item => item.id === selectedReplacementPoiId.value
+  )
+  if (!candidate) return
+
+  const { dayIndex, attractionIndex } = replacementTarget.value
+  const existing = tripPlan.value.days.some((day, currentDayIndex) =>
+    day.attractions.some((item, currentAttractionIndex) =>
+      item.poi_id === candidate.id &&
+      !(currentDayIndex === dayIndex && currentAttractionIndex === attractionIndex)
+    )
+  )
+  if (existing) {
+    message.warning('这个景点已经在行程中')
+    return
+  }
+
+  const old = tripPlan.value.days[dayIndex].attractions[attractionIndex] as EditableAttraction
+  const sourceId = old.replacement_source_id || old.poi_id || old.name
+  tripPlan.value.days[dayIndex].attractions[attractionIndex] = {
+    ...old,
+    poi_id: candidate.id,
+    name: candidate.name,
+    address: candidate.address,
+    location: candidate.location,
+    category: candidate.type,
+    description: '用户选择的替换景点',
+    replacement_poi_id: candidate.id,
+    replacement_source_id: sourceId
+  } as EditableAttraction
+  replacementModalOpen.value = false
+  message.success('已加入替换操作，保存后会重新计算路线和预算')
 }
 
 const getMealLabel = (type: string): string => {
@@ -1234,6 +1410,10 @@ const drawRoutes = async (AMap: any, attractions: any[],city:string) => {
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
 }
 
+.price-unknown {
+  background: rgba(250, 173, 20, 0.92);
+}
+
 /* 天气卡片样式 */
 .weather-card {
   background: linear-gradient(135deg, #e0f7fa 0%, #b2ebf2 100%);
@@ -1305,6 +1485,29 @@ const drawRoutes = async (AMap: any, attractions: any[],city:string) => {
 .back-top-button:hover {
   transform: scale(1.1);
   box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4);
+}
+
+.replacement-list {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-height: 360px;
+  margin-top: 18px;
+  overflow-y: auto;
+}
+
+.replacement-option {
+  display: flex;
+  align-items: flex-start;
+  padding: 12px 4px;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.replacement-option span {
+  display: block;
+  margin-top: 4px;
+  color: #777;
+  white-space: normal;
 }
 
 /* 酒店卡片样式 */

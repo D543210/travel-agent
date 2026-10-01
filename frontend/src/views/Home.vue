@@ -87,6 +87,14 @@
               </a-form-item>
             </a-col>
           </a-row>
+          <a-space direction="vertical">
+            <a-checkbox v-model:checked="useSavedPreferences">
+              使用已保存的长期偏好
+            </a-checkbox>
+            <a-checkbox v-model:checked="saveCurrentPreferences">
+              保存这些偏好，供以后行程使用
+            </a-checkbox>
+          </a-space>
         </div>
 
         <!-- 第二步:偏好设置 -->
@@ -141,6 +149,60 @@
               </a-form-item>
             </a-col>
           </a-row>
+
+          <a-row :gutter="24">
+            <a-col :span="12">
+              <a-form-item label="饮食限制">
+                <a-select
+                  v-model:value="dietaryRestrictions"
+                  mode="tags"
+                  :max-tag-count="6"
+                  placeholder="例如：素食、无麸质、海鲜过敏"
+                  size="large"
+                />
+              </a-form-item>
+            </a-col>
+            <a-col :span="12">
+              <a-form-item label="旅行节奏">
+                <a-select v-model:value="travelPace" allow-clear placeholder="选择旅行节奏" size="large">
+                  <a-select-option value="舒缓">舒缓：减少景点，留出休息时间</a-select-option>
+                  <a-select-option value="适中">适中：游览与休息平衡</a-select-option>
+                  <a-select-option value="紧凑">紧凑：尽可能多安排景点</a-select-option>
+                </a-select>
+              </a-form-item>
+            </a-col>
+          </a-row>
+
+          <div class="saved-preferences-panel">
+            <template v-if="savedPreferences">
+              <div class="saved-preferences-summary">
+                <strong>已保存的长期偏好：</strong>
+                <span>{{ savedPreferenceSummary }}</span>
+              </div>
+              <a-space wrap>
+                <a-button size="small" @click="applySavedPreferences">
+                  应用到当前表单
+                </a-button>
+                <a-button size="small" @click="saveCurrentPreferenceNow">
+                  用当前表单更新
+                </a-button>
+                <a-popconfirm
+                  title="确定删除已保存的长期偏好吗？"
+                  ok-text="删除"
+                  cancel-text="取消"
+                  @confirm="removeSavedPreferences"
+                >
+                  <a-button size="small" danger>删除长期偏好</a-button>
+                </a-popconfirm>
+              </a-space>
+            </template>
+            <template v-else>
+              <span class="saved-preferences-empty">目前没有已保存的长期偏好。</span>
+              <a-button size="small" type="link" @click="saveCurrentPreferenceNow">
+                保存当前表单偏好
+              </a-button>
+            </template>
+          </div>
         </div>
 
         <!-- 第三步:额外要求 -->
@@ -204,17 +266,49 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
-import { generateTripPlan } from '@/services/api'
-import type { TripFormData } from '@/types'
+import {
+  createTripPlanningJob,
+  deletePreferences,
+  getPreferences,
+  getPlanningJob,
+  savePreferences
+} from '@/services/api'
+import type { PlanningJob, TripFormData, UserPreference } from '@/types'
 import type { Dayjs } from 'dayjs'
 
 const router = useRouter()
 const loading = ref(false)
 const loadingProgress = ref(0)
 const loadingStatus = ref('')
+const useSavedPreferences = ref(false)
+const saveCurrentPreferences = ref(false)
+const savedPreferences = ref<UserPreference | null>(null)
+const dietaryRestrictions = ref<string[]>([])
+const travelPace = ref<string | undefined>()
+let pollingCancelled = false
+
+const savedPreferenceSummary = computed(() => {
+  const preference = savedPreferences.value
+  if (!preference) return ''
+  return [
+    preference.attraction_types.length
+      ? `景点：${preference.attraction_types.join('、')}`
+      : '',
+    preference.transportation_preference
+      ? `交通：${preference.transportation_preference}`
+      : '',
+    preference.accommodation_preference
+      ? `住宿：${preference.accommodation_preference}`
+      : '',
+    preference.dietary_restrictions.length
+      ? `饮食限制：${preference.dietary_restrictions.join('、')}`
+      : '',
+    preference.travel_pace ? `节奏：${preference.travel_pace}` : ''
+  ].filter(Boolean).join('；') || '尚未设置具体偏好'
+})
 
 type TripFormState = Omit<TripFormData, 'start_date' | 'end_date'> & {
   start_date: Dayjs | null
@@ -248,6 +342,108 @@ watch([() => formData.start_date, () => formData.end_date], ([start, end]) => {
   }
 })
 
+const preferenceFromCurrentForm = (): UserPreference => ({
+  attraction_types: [...formData.preferences],
+  dietary_restrictions: [...dietaryRestrictions.value],
+  travel_pace: travelPace.value || null,
+  transportation_preference: formData.transportation,
+  accommodation_preference: formData.accommodation
+})
+
+const saveCurrentPreferenceNow = async () => {
+  try {
+    savedPreferences.value = await savePreferences(preferenceFromCurrentForm())
+    useSavedPreferences.value = true
+    message.success('长期偏好已保存')
+  } catch (error: any) {
+    message.error(error.response?.data?.detail?.message || '保存长期偏好失败')
+  }
+}
+
+const applySavedPreferences = () => {
+  const preference = savedPreferences.value
+  if (!preference) return
+  formData.preferences = [...preference.attraction_types]
+  dietaryRestrictions.value = [...preference.dietary_restrictions]
+  travelPace.value = preference.travel_pace || undefined
+  if (preference.transportation_preference) {
+    formData.transportation = preference.transportation_preference
+  }
+  if (preference.accommodation_preference) {
+    formData.accommodation = preference.accommodation_preference
+  }
+  useSavedPreferences.value = true
+  message.success('已将长期偏好应用到当前表单')
+}
+
+const removeSavedPreferences = async () => {
+  try {
+    await deletePreferences()
+    savedPreferences.value = null
+    useSavedPreferences.value = false
+    message.success('长期偏好已删除')
+  } catch (error: any) {
+    message.error(error.response?.data?.detail?.message || '删除长期偏好失败')
+  }
+}
+
+const finishPlanningJob = async (job: PlanningJob) => {
+  loadingProgress.value = 100
+  loadingStatus.value = '✅ 行程已生成'
+  sessionStorage.setItem('activeTripVersion', String(job.result_version || 1))
+  sessionStorage.removeItem('activeJobId')
+  message.success('旅行计划生成成功!')
+  await router.push({ name: 'TripResult', params: { tripId: job.trip_id } })
+}
+
+const pollPlanningJob = async (jobId: string) => {
+  const deadline = Date.now() + 45 * 60 * 1000
+  while (!pollingCancelled && Date.now() < deadline) {
+    const job = await getPlanningJob(jobId)
+    loadingProgress.value = job.progress_percent
+    loadingStatus.value = job.progress_message
+    if (job.status === 'failed') {
+      sessionStorage.removeItem('activeJobId')
+      throw new Error(job.error_message || `任务在${job.stage}阶段失败`)
+    }
+    if (job.status === 'succeeded') {
+      await finishPlanningJob(job)
+      return
+    }
+    await new Promise(resolve => setTimeout(resolve, 1500))
+  }
+  if (!pollingCancelled) {
+    throw new Error('任务等待时间过长，请到“我的行程”查看状态')
+  }
+}
+
+onBeforeUnmount(() => {
+  pollingCancelled = true
+})
+
+onMounted(async () => {
+  pollingCancelled = false
+  try {
+    savedPreferences.value = await getPreferences()
+  } catch {
+    savedPreferences.value = null
+  }
+
+  const activeJobId = sessionStorage.getItem('activeJobId')
+  const activeTripId = sessionStorage.getItem('activeTripId')
+  if (!activeJobId || !activeTripId) return
+
+  loading.value = true
+  loadingStatus.value = '正在恢复后台任务进度...'
+  try {
+    await pollPlanningJob(activeJobId)
+  } catch (error: any) {
+    message.error(error.message || '恢复后台任务失败')
+  } finally {
+    loading.value = false
+  }
+})
+
 const handleSubmit = async () => {
   if (!formData.start_date || !formData.end_date) {
     message.error('请选择日期')
@@ -256,28 +452,10 @@ const handleSubmit = async () => {
 
   loading.value = true
   loadingProgress.value = 0
-  loadingStatus.value = '正在初始化...'
-
-  // 模拟进度更新
-  const progressInterval = setInterval(() => {
-    if (loadingProgress.value < 90) {
-      loadingProgress.value += 10
-
-      // 更新状态文本
-      if (loadingProgress.value <= 30) {
-        loadingStatus.value = '🔍 正在搜索景点...'
-      } else if (loadingProgress.value <= 50) {
-        loadingStatus.value = '🌤️ 正在查询天气...'
-      } else if (loadingProgress.value <= 70) {
-        loadingStatus.value = '🏨 正在推荐酒店...'
-      } else {
-        loadingStatus.value = '📋 正在生成行程计划...'
-      }
-    }
-  }, 500)
+  loadingStatus.value = '正在创建后台任务...'
 
   try {
-    const requestData: TripFormData = {
+    const requestData = {
       city: formData.city,
       start_date: formData.start_date.format('YYYY-MM-DD'),
       end_date: formData.end_date.format('YYYY-MM-DD'),
@@ -285,41 +463,27 @@ const handleSubmit = async () => {
       transportation: formData.transportation,
       accommodation: formData.accommodation,
       preferences: formData.preferences,
-      free_text_input: formData.free_text_input
+      free_text_input: formData.free_text_input,
+      use_saved_preferences: useSavedPreferences.value
     }
 
-    const response = await generateTripPlan(requestData)
-
-    clearInterval(progressInterval)
-    loadingProgress.value = 100
-    loadingStatus.value = '✅ 完成!'
-
-    if (response.success && response.data) {
-      // 保存到sessionStorage
-      sessionStorage.setItem('tripPlan', JSON.stringify(response.data))
-
-      if (response.status === 'degraded') {
-        message.warning(response.warnings.join('；') || response.message)
-      } else {
-        message.success('旅行计划生成成功!')
-      }
-
-      // 短暂延迟后跳转
-      setTimeout(() => {
-        router.push('/result')
-      }, 500)
-    } else {
-      message.error(response.message || '生成失败')
+    if (saveCurrentPreferences.value) {
+      savedPreferences.value = await savePreferences(preferenceFromCurrentForm())
     }
+
+    const created = await createTripPlanningJob(requestData)
+    sessionStorage.setItem('activeTripId', created.trip_id)
+    sessionStorage.setItem('activeJobId', created.job_id)
+
+    await pollPlanningJob(created.job_id)
   } catch (error: any) {
-    clearInterval(progressInterval)
-    message.error(error.message || '生成旅行计划失败,请稍后重试')
+    message.error(
+      error.response?.data?.detail?.message ||
+      error.message ||
+      '生成旅行计划失败,请稍后重试'
+    )
   } finally {
-    setTimeout(() => {
-      loading.value = false
-      loadingProgress.value = 0
-      loadingStatus.value = ''
-    }, 1000)
+    loading.value = false
   }
 }
 </script>
@@ -551,6 +715,24 @@ const handleSubmit = async () => {
   flex-wrap: wrap;
   gap: 8px;
   width: 100%;
+}
+
+.saved-preferences-panel {
+  margin-top: 20px;
+  padding: 14px 16px;
+  border: 1px solid #d9dff7;
+  border-radius: 12px;
+  background: #f7f8ff;
+}
+
+.saved-preferences-summary {
+  margin-bottom: 12px;
+  color: #4a4f68;
+  line-height: 1.7;
+}
+
+.saved-preferences-empty {
+  color: #777;
 }
 
 .preference-tag :deep(.ant-checkbox-wrapper) {

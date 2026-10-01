@@ -1,11 +1,12 @@
 from contextvars import ContextVar
-
-from typing import Optional
+import json
+import logging
 
 _request_id: ContextVar[str] = ContextVar(
     "request_id",
     default="-",
 )
+logger = logging.getLogger("trip_planner")
 
 def set_request_id(request_id: str):
     """设置当前请求ID并返回重置令牌。"""
@@ -20,8 +21,10 @@ def get_request_id() -> str:
     return _request_id.get()
 
 def log(message: str) -> None:
-    """输出带请求ID的日志"""
-    print(
-        f"[request_id={get_request_id()}] "
-        f"{message}"
+    """输出不包含用户请求正文的结构化日志。"""
+    logger.info(
+        json.dumps(
+            {"request_id": get_request_id(), "message": message},
+            ensure_ascii=False,
+        )
     )
